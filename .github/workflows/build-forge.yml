@@ -19,15 +19,29 @@ jobs:
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 45
+
     steps:
-      - name: Checkout private Forge source
-        uses: actions/checkout@v4
-        with:
-          repository: Ratwaredev/ratlab
-          ref: main
-          token: ${{ secrets.RATLAB_SOURCE_TOKEN }}
-          path: forge-src
-          persist-credentials: false
+      - name: Clone private Forge source
+        shell: pwsh
+        env:
+          RATLAB_SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:RATLAB_SOURCE_TOKEN)) {
+            throw "Missing RATLAB_SOURCE_TOKEN secret."
+          }
+
+          $credentials = "x-access-token:$env:RATLAB_SOURCE_TOKEN"
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($credentials))
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $encoded" `
+            clone --depth 1 --branch main `
+            https://github.com/Ratwaredev/ratlab.git forge-src
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to clone the private Forge source repository."
+          }
+
+          $sourceVersion = node -p "require('./forge-src/package.json').version"
+          Write-Host "Forge source cloned. Version: $sourceVersion"
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -57,15 +71,24 @@ jobs:
         shell: pwsh
         run: |
           $version = node -p "require('./package.json').version"
-          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid version: $version" }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Invalid version: $version"
+          }
+
           $installer = "release/Forge-Studio-Setup-$version-x64.exe"
           $blockmap = "$installer.blockmap"
           $latest = "release/latest.yml"
+
           foreach ($file in @($installer, $blockmap, $latest)) {
-            if (-not (Test-Path $file)) { throw "Missing release asset: $file" }
+            if (-not (Test-Path $file)) {
+              throw "Missing release asset: $file"
+            }
           }
+
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
-          "$hash  Forge-Studio-Setup-$version-x64.exe" | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          "$hash  Forge-Studio-Setup-$version-x64.exe" |
+            Set-Content -Encoding ascii release/SHA256SUMS.txt
+
           "version=$version" >> $env:GITHUB_OUTPUT
           "tag=v$version" >> $env:GITHUB_OUTPUT
 
@@ -80,6 +103,7 @@ jobs:
           if (gh release view $env:RELEASE_TAG --repo "${{ github.repository }}" 2>$null) {
             throw "Release $env:RELEASE_TAG already exists. Bump package.json first."
           }
+
           @"
           # Forge Studio $env:RELEASE_TAG
 
@@ -112,16 +136,22 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force verify | Out-Null
           gh release download $env:RELEASE_TAG --repo "${{ github.repository }}" --dir verify
+
           foreach ($file in @(
             "verify/Forge-Studio-Setup-$env:VERSION-x64.exe",
             "verify/Forge-Studio-Setup-$env:VERSION-x64.exe.blockmap",
             "verify/latest.yml",
             "verify/SHA256SUMS.txt"
           )) {
-            if (-not (Test-Path $file)) { throw "Published asset missing: $file" }
+            if (-not (Test-Path $file)) {
+              throw "Published asset missing: $file"
+            }
           }
+
           Push-Location verify
           $expected = (Get-Content SHA256SUMS.txt).Split(' ')[0]
           $actual = (Get-FileHash "Forge-Studio-Setup-$env:VERSION-x64.exe" -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($expected -ne $actual) { throw "Checksum mismatch" }
+          if ($expected -ne $actual) {
+            throw "Checksum mismatch"
+          }
           Pop-Location
