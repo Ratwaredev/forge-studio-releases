@@ -1,14 +1,14 @@
 {
-  "version": null,
-  "tag": null,
-  "status": "failure",
+  "version": "0.27.0",
+  "tag": "v0.27.0",
+  "status": "success",
   "runId": "30761116142",
   "commit": "d839c6ff85c4b9a89f3485890e472abae22a2f05",
-  "installer": null,
-  "installerBytes": 0,
-  "sha256": null,
-  "downloadUrl": null,
-  "latestUrl": null,
+  "installer": "Forge-Studio-Setup-0.27.0-x64.exe",
+  "installerBytes": 226488301,
+  "sha256": "021c538d4d6188f38feea1a274d28d3064f3950102f4bae93868109b83805077",
+  "downloadUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.27.0/Forge-Studio-Setup-0.27.0-x64.exe",
+  "latestUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.27.0/latest.yml",
   "updater": {
     "provider": "github",
     "repository": "Ratwaredev/forge-studio-releases",
@@ -17,5 +17,5 @@
     "autoDownload": true,
     "autoInstallOnQuit": true
   },
-  "recordedAt": "2026-08-02T18:27:31.571Z"
+  "recordedAt": "2026-08-02T18:33:18.273Z"
 }
