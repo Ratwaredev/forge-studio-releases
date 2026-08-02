@@ -1,0 +1,21 @@
+{
+  "version": null,
+  "tag": null,
+  "status": "failure",
+  "runId": "30761116142",
+  "commit": "d839c6ff85c4b9a89f3485890e472abae22a2f05",
+  "installer": null,
+  "installerBytes": 0,
+  "sha256": null,
+  "downloadUrl": null,
+  "latestUrl": null,
+  "updater": {
+    "provider": "github",
+    "repository": "Ratwaredev/forge-studio-releases",
+    "startupCheckSeconds": 5,
+    "repeatCheckHours": 4,
+    "autoDownload": true,
+    "autoInstallOnQuit": true
+  },
+  "recordedAt": "2026-08-02T18:27:31.571Z"
+}
