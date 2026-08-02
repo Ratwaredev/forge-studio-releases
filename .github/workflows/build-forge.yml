@@ -2,6 +2,11 @@ name: Build and publish Forge Studio
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/build-forge.yml"
 
 permissions:
   contents: write
@@ -13,6 +18,7 @@ concurrency:
 jobs:
   build-windows:
     runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout private Forge source
         uses: actions/checkout@v4
@@ -83,6 +89,7 @@ jobs:
           - Update metadata: latest.yml
           - Delta metadata: installer blockmap
           - Integrity: SHA256SUMS.txt
+          - Source repository: private
           "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
 
           gh release create $env:RELEASE_TAG `
