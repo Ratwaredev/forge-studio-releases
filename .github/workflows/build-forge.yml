@@ -1,3 +1,4 @@
+# Builds the latest verified Forge source from Ratwaredev/ratlab.
 name: Build and publish Forge Studio
 
 on:
