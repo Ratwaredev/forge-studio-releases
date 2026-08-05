@@ -1,14 +1,14 @@
 {
-  "version": "0.27.0",
-  "tag": "v0.27.0",
+  "version": "0.28.0",
+  "tag": "v0.28.0",
   "status": "success",
   "runId": "30761116142",
   "commit": "d839c6ff85c4b9a89f3485890e472abae22a2f05",
-  "installer": "Forge-Studio-Setup-0.27.0-x64.exe",
-  "installerBytes": 226488301,
-  "sha256": "021c538d4d6188f38feea1a274d28d3064f3950102f4bae93868109b83805077",
-  "downloadUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.27.0/Forge-Studio-Setup-0.27.0-x64.exe",
-  "latestUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.27.0/latest.yml",
+  "installer": "Forge-Studio-Setup-0.28.0-x64.exe",
+  "installerBytes": 226501038,
+  "sha256": "f826f29044d9777787a43f832340924354e0f3c820aa84a41c0656581a55f996",
+  "downloadUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.28.0/Forge-Studio-Setup-0.28.0-x64.exe",
+  "latestUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.28.0/latest.yml",
   "updater": {
     "provider": "github",
     "repository": "Ratwaredev/forge-studio-releases",
@@ -17,5 +17,5 @@
     "autoDownload": true,
     "autoInstallOnQuit": true
   },
-  "recordedAt": "2026-08-02T18:33:18.273Z"
+  "recordedAt": "2026-08-05T21:07:03.218Z"
 }
