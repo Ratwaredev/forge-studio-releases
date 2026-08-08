@@ -27,7 +27,29 @@ jobs:
           if (!/^https:\/\//.test(value.supabaseUrl || '')) throw new Error('Missing Supabase URL');
           if (!value.supabaseAnonKey || value.supabaseAnonKey.length < 20) throw new Error('Missing Supabase anon key');
           if (value.otpType !== 'email') throw new Error('Email OTP contract missing');
-          console.log('Shared desktop auth channel is ready.');
+          const out = process.env.GITHUB_ENV;
+          fs.appendFileSync(out, `AUTH_URL=${value.supabaseUrl.replace(/\/$/, '')}\n`);
+          fs.appendFileSync(out, `AUTH_KEY=${value.supabaseAnonKey}\n`);
+          NODE
+
+      - name: Probe live Supabase Auth
+        run: |
+          set -euo pipefail
+          code=$(curl --silent --show-error --output auth-settings.json --write-out '%{http_code}' \
+            --connect-timeout 10 --max-time 25 \
+            -H "apikey: $AUTH_KEY" \
+            -H "Authorization: Bearer $AUTH_KEY" \
+            "$AUTH_URL/auth/v1/settings")
+          if [ "$code" != '200' ]; then
+            echo "Supabase Auth is not reachable (HTTP $code)." >&2
+            cat auth-settings.json >&2 || true
+            exit 1
+          fi
+          node - <<'NODE'
+          const fs = require('fs');
+          const value = JSON.parse(fs.readFileSync('auth-settings.json', 'utf8'));
+          if (!value || typeof value !== 'object') throw new Error('Invalid Supabase Auth settings response');
+          console.log('Shared desktop auth service is live.');
           NODE
 
       - name: Dispatch verified Forge build
