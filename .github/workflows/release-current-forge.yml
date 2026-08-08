@@ -1,0 +1,36 @@
+name: Release current Forge source
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-current-forge.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  preflight-and-dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify shared email auth channel
+        run: |
+          set -euo pipefail
+          url='https://github.com/Ratwaredev/nexosupport/releases/latest/download/auth-config.json'
+          curl --fail --location --retry 4 --retry-delay 3 "$url" -o auth-config.json
+          node - <<'NODE'
+          const fs = require('fs');
+          const value = JSON.parse(fs.readFileSync('auth-config.json', 'utf8'));
+          if (value.provider !== 'supabase') throw new Error('Unexpected auth provider');
+          if (!/^https:\/\//.test(value.supabaseUrl || '')) throw new Error('Missing Supabase URL');
+          if (!value.supabaseAnonKey || value.supabaseAnonKey.length < 20) throw new Error('Missing Supabase anon key');
+          if (value.otpType !== 'email') throw new Error('Email OTP contract missing');
+          console.log('Shared desktop auth channel is ready.');
+          NODE
+
+      - name: Dispatch verified Forge build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build-forge.yml --repo "${{ github.repository }}"
