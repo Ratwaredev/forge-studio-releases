@@ -94,6 +94,35 @@ jobs:
         working-directory: forge-src
         run: npm ci
 
+      - name: Embed and verify desktop auth config
+        working-directory: forge-src
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $url = "https://github.com/Ratwaredev/nexosupport/releases/latest/download/auth-config.json"
+          curl.exe --fail --location --retry 4 --retry-delay 2 --connect-timeout 10 --max-time 40 `
+            $url --output desktop/auth-config.json
+          if ($LASTEXITCODE -ne 0 -or -not (Test-Path desktop/auth-config.json)) {
+            throw "Unable to fetch Forge desktop auth config."
+          }
+
+          $config = Get-Content desktop/auth-config.json -Raw | ConvertFrom-Json
+          if ($config.provider -ne 'supabase') { throw "Unexpected desktop auth provider." }
+          if ($config.supabaseUrl -notmatch '^https://') { throw "Invalid Supabase URL." }
+          if ([string]::IsNullOrWhiteSpace($config.supabaseAnonKey) -or $config.supabaseAnonKey.Length -lt 20) {
+            throw "Missing Supabase anon key."
+          }
+          if ($config.otpType -ne 'email') { throw "Email OTP contract missing." }
+
+          $origin = $config.supabaseUrl.TrimEnd('/')
+          $headers = @{
+            apikey = $config.supabaseAnonKey
+            Authorization = "Bearer $($config.supabaseAnonKey)"
+          }
+          $settings = Invoke-WebRequest -Uri "$origin/auth/v1/settings" -Headers $headers -Method Get -TimeoutSec 20
+          if ($settings.StatusCode -ne 200) { throw "Supabase Auth preflight failed." }
+          Write-Host "Desktop auth config embedded and Supabase Auth reachable."
+
       - name: Validate source and release version
         id: version
         working-directory: forge-src
@@ -157,6 +186,7 @@ jobs:
             throw "Windows build must include NSIS for electron-updater compatibility."
           }
           $main = Get-Content desktop/main.cjs -Raw
+          $bootstrap = Get-Content desktop/update-bootstrap.cjs -Raw
           foreach ($contract in @(
             'autoUpdater.autoDownload = true',
             'autoUpdater.autoInstallOnAppQuit = true',
@@ -165,6 +195,16 @@ jobs:
           )) {
             if (-not $main.Contains($contract)) {
               throw "Missing updater contract: $contract"
+            }
+          }
+          foreach ($contract in @(
+            'auth-config.json',
+            'auth-config-cache.json',
+            'fetchWithRetry',
+            'global.fetch'
+          )) {
+            if (-not $bootstrap.Contains($contract)) {
+              throw "Missing auth resilience contract: $contract"
             }
           }
 
@@ -192,12 +232,17 @@ jobs:
           $installer = "release/$installerName"
           $blockmap = "$installer.blockmap"
           $latest = "release/latest.yml"
+          $embeddedAuth = "release/win-unpacked/resources/app/desktop/auth-config.json"
 
-          foreach ($file in @($installer, $blockmap, $latest)) {
+          foreach ($file in @($installer, $blockmap, $latest, $embeddedAuth)) {
             if (-not (Test-Path $file)) { throw "Missing release asset: $file" }
           }
           if ((Get-Item $installer).Length -lt 10MB) {
             throw "Installer is unexpectedly small."
+          }
+          $embeddedConfig = Get-Content $embeddedAuth -Raw | ConvertFrom-Json
+          if ($embeddedConfig.provider -ne 'supabase' -or $embeddedConfig.otpType -ne 'email') {
+            throw "Packaged desktop auth config is invalid."
           }
 
           $latestText = Get-Content $latest -Raw
@@ -272,6 +317,7 @@ jobs:
           - Delta metadata: blockmap + latest.yml
           - Integrity: SHA256SUMS.txt
           - Update policy snapshot: update-policy.json
+          - Desktop auth config: embedded and preflight-verified
           "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
 
           $assets = @(
