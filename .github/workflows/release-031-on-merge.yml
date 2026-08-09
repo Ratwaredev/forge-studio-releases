@@ -1,0 +1,31 @@
+name: Bootstrap Forge 0.31 release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/release-031-on-merge.yml'
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  dispatch-controlled-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch controlled Forge 0.31 release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh workflow run controlled-release.yml \
+            --repo "${{ github.repository }}" \
+            --ref main \
+            -f source_ref=main \
+            -f rollout_percentage=100 \
+            -f minimum_supported_version=0.30.0 \
+            -f blocked_versions= \
+            -f release_notes='Forge 0.31: resilient packaged email auth and controlled desktop updates.'
+          echo 'Controlled Forge 0.31 release dispatched.'
