@@ -1,0 +1,140 @@
+name: Manage Forge rollout
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing Forge release tag to control, for example v0.31.0
+        required: true
+        type: string
+      rollout_percentage:
+        description: Eligible clients for this release (1-100)
+        required: true
+        default: "10"
+        type: string
+      paused:
+        description: Pause healthy Forge 0.31+ clients from checking this rollout
+        required: true
+        default: false
+        type: boolean
+      minimum_supported_version:
+        description: Oldest supported Forge version
+        required: false
+        default: ""
+        type: string
+      blocked_versions:
+        description: Comma-separated versions that must recover forward
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-rollout-control
+  cancel-in-progress: false
+
+jobs:
+  update-release-control:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Validate inputs
+        id: values
+        shell: bash
+        env:
+          TAG: ${{ inputs.release_tag }}
+          ROLLOUT: ${{ inputs.rollout_percentage }}
+          MINIMUM: ${{ inputs.minimum_supported_version }}
+          BLOCKED: ${{ inputs.blocked_versions }}
+        run: |
+          set -euo pipefail
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "release_tag must be vX.Y.Z" >&2; exit 1; }
+          [[ "$ROLLOUT" =~ ^[0-9]+$ ]] || { echo "rollout_percentage must be an integer" >&2; exit 1; }
+          (( ROLLOUT >= 1 && ROLLOUT <= 100 )) || { echo "rollout_percentage must be 1-100" >&2; exit 1; }
+          if [[ -n "$MINIMUM" && ! "$MINIMUM" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "minimum_supported_version must be X.Y.Z" >&2
+            exit 1
+          fi
+          IFS=',' read -ra blocked <<< "$BLOCKED"
+          for item in "${blocked[@]}"; do
+            item="$(echo "$item" | xargs)"
+            [[ -z "$item" || "$item" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid blocked version: $item" >&2; exit 1; }
+          done
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Download current release control assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          mkdir control
+          gh release view "$TAG" --repo "${{ github.repository }}" >/dev/null
+          gh release download "$TAG" --repo "${{ github.repository }}" --dir control --pattern latest.yml --pattern update-policy.json
+          test -s control/latest.yml
+
+      - name: Update staged feed and policy
+        shell: python
+        env:
+          VERSION: ${{ steps.values.outputs.version }}
+          ROLLOUT: ${{ inputs.rollout_percentage }}
+          PAUSED: ${{ inputs.paused }}
+          MINIMUM: ${{ inputs.minimum_supported_version }}
+          BLOCKED: ${{ inputs.blocked_versions }}
+        run: |
+          import json, os, pathlib, re
+
+          latest_path = pathlib.Path("control/latest.yml")
+          latest = latest_path.read_text(encoding="utf-8-sig")
+          if not re.search(rf"(?m)^version:\s*{re.escape(os.environ['VERSION'])}\s*$", latest):
+              raise SystemExit("latest.yml version does not match release tag")
+          latest = re.sub(r"(?m)^stagingPercentage:\s*\d+\s*\n?", "", latest).rstrip()
+          rollout = int(os.environ["ROLLOUT"])
+          if rollout < 100:
+              latest += f"\nstagingPercentage: {rollout}\n"
+          else:
+              latest += "\n"
+          latest_path.write_text(latest, encoding="utf-8")
+
+          blocked = [v.strip() for v in os.environ.get("BLOCKED", "").split(",") if v.strip()]
+          policy = {
+              "schema": 1,
+              "latestVersion": os.environ["VERSION"],
+              "minimumSupportedVersion": os.environ.get("MINIMUM") or None,
+              "rolloutPercentage": rollout,
+              "blockedVersions": blocked,
+              "paused": os.environ.get("PAUSED", "false").lower() == "true",
+              "feed": "github-releases",
+              "repository": "${{ github.repository }}",
+          }
+          pathlib.Path("control/update-policy.json").write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
+
+      - name: Publish control changes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          gh release upload "$TAG" control/latest.yml control/update-policy.json --repo "${{ github.repository }}" --clobber
+
+      - name: Verify published state
+        shell: python
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.release_tag }}
+          ROLLOUT: ${{ inputs.rollout_percentage }}
+          PAUSED: ${{ inputs.paused }}
+        run: |
+          import json, os, pathlib, subprocess, tempfile
+          with tempfile.TemporaryDirectory() as folder:
+              subprocess.run([
+                  "gh", "release", "download", os.environ["TAG"],
+                  "--repo", "${{ github.repository }}", "--dir", folder,
+                  "--pattern", "latest.yml", "--pattern", "update-policy.json"
+              ], check=True)
+              policy = json.loads(pathlib.Path(folder, "update-policy.json").read_text(encoding="utf-8-sig"))
+              assert policy["rolloutPercentage"] == int(os.environ["ROLLOUT"])
+              assert policy["paused"] is (os.environ["PAUSED"].lower() == "true")
+              print(f"Rollout verified: {policy['latestVersion']} at {policy['rolloutPercentage']}%, paused={policy['paused']}")
