@@ -1,0 +1,341 @@
+name: Controlled Forge release
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: Ratwaredev/ratlab branch, tag, or commit to build
+        required: true
+        default: main
+        type: string
+      rollout_percentage:
+        description: Percentage of installed clients eligible for this release (1-100)
+        required: true
+        default: "10"
+        type: string
+      minimum_supported_version:
+        description: Oldest supported Forge version (metadata for the control plane)
+        required: false
+        default: ""
+        type: string
+      blocked_versions:
+        description: Comma-separated Forge versions known to be bad
+        required: false
+        default: ""
+        type: string
+      release_notes:
+        description: Optional operator note added to the GitHub release
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-controlled-release
+  cancel-in-progress: false
+
+jobs:
+  build-release-verify:
+    runs-on: windows-latest
+    timeout-minutes: 50
+
+    steps:
+      - name: Validate release controls
+        id: controls
+        shell: pwsh
+        env:
+          ROLLOUT: ${{ inputs.rollout_percentage }}
+          MINIMUM: ${{ inputs.minimum_supported_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $rollout = 0
+          if (-not [int]::TryParse($env:ROLLOUT, [ref]$rollout) -or $rollout -lt 1 -or $rollout -gt 100) {
+            throw "rollout_percentage must be an integer from 1 to 100."
+          }
+          if ($env:MINIMUM -and $env:MINIMUM -notmatch '^\d+\.\d+\.\d+$') {
+            throw "minimum_supported_version must use stable semver (x.y.z)."
+          }
+          "rollout=$rollout" >> $env:GITHUB_OUTPUT
+
+      - name: Clone private Forge source
+        shell: pwsh
+        env:
+          RATLAB_SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
+          SOURCE_REF: ${{ inputs.source_ref }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ([string]::IsNullOrWhiteSpace($env:RATLAB_SOURCE_TOKEN)) {
+            throw "Missing RATLAB_SOURCE_TOKEN secret."
+          }
+          if ([string]::IsNullOrWhiteSpace($env:SOURCE_REF)) {
+            throw "source_ref is required."
+          }
+
+          $credentials = "x-access-token:$env:RATLAB_SOURCE_TOKEN"
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($credentials))
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $encoded" `
+            clone --depth 1 --branch $env:SOURCE_REF `
+            https://github.com/Ratwaredev/ratlab.git forge-src
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to clone Ratwaredev/ratlab ref '$env:SOURCE_REF'."
+          }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: forge-src/package-lock.json
+
+      - name: Install dependencies
+        working-directory: forge-src
+        run: npm ci
+
+      - name: Validate source and release version
+        id: version
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MINIMUM: ${{ inputs.minimum_supported_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = node -p "require('./package.json').version"
+          if ($version -notmatch '^\d+\.\d+\.\d+$') {
+            throw "Controlled stable releases require x.y.z semver. Got: $version"
+          }
+
+          npm test
+          if ($LASTEXITCODE -ne 0) { throw "Forge validation failed." }
+
+          $existing = gh release view "v$version" --repo "${{ github.repository }}" --json tagName 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "v$version already exists; this run will repair/replace its verified assets."
+          } else {
+            $latestJson = gh release view --repo "${{ github.repository }}" --json tagName 2>$null
+            if ($LASTEXITCODE -eq 0 -and $latestJson) {
+              $latestTag = ($latestJson | ConvertFrom-Json).tagName
+              $latestVersion = $latestTag -replace '^v', ''
+              $newParts = $version.Split('.') | ForEach-Object { [int]$_ }
+              $oldParts = $latestVersion.Split('.') | ForEach-Object { [int]$_ }
+              $newValue = [version]::new($newParts[0], $newParts[1], $newParts[2])
+              $oldValue = [version]::new($oldParts[0], $oldParts[1], $oldParts[2])
+              if ($newValue -le $oldValue) {
+                throw "Version $version must be greater than current latest $latestVersion."
+              }
+            }
+          }
+
+          if ($env:MINIMUM) {
+            $minimum = [version]$env:MINIMUM
+            $current = [version]$version
+            if ($minimum -gt $current) {
+              throw "minimum_supported_version cannot be newer than the release itself."
+            }
+          }
+
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Verify updater contract
+        working-directory: forge-src
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($package.dependencies.'electron-updater' -eq $null) {
+            throw "electron-updater dependency is missing."
+          }
+          $provider = @($package.build.publish)[0]
+          if ($provider.provider -ne 'github' -or $provider.owner -ne 'Ratwaredev' -or $provider.repo -ne 'forge-studio-releases') {
+            throw "Forge publish provider does not point to Ratwaredev/forge-studio-releases."
+          }
+          if ($package.build.win.target -notcontains 'nsis') {
+            throw "Windows build must include NSIS for electron-updater compatibility."
+          }
+          $main = Get-Content desktop/main.cjs -Raw
+          foreach ($contract in @(
+            'autoUpdater.autoDownload = true',
+            'autoUpdater.autoInstallOnAppQuit = true',
+            'checkForUpdates()',
+            '4 * 60 * 60 * 1_000'
+          )) {
+            if (-not $main.Contains($contract)) {
+              throw "Missing updater contract: $contract"
+            }
+          }
+
+      - name: Build Windows installer
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          CSC_LINK: ${{ secrets.FORGE_WINDOWS_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.FORGE_WINDOWS_CSC_KEY_PASSWORD }}
+        run: npm run dist:win -- --publish never
+
+      - name: Apply staged rollout and verify local artifacts
+        id: artifacts
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          ROLLOUT: ${{ steps.controls.outputs.rollout }}
+          CSC_LINK: ${{ secrets.FORGE_WINDOWS_CSC_LINK }}
+          MINIMUM: ${{ inputs.minimum_supported_version }}
+          BLOCKED: ${{ inputs.blocked_versions }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $installerName = "Forge-Studio-Setup-$env:VERSION-x64.exe"
+          $installer = "release/$installerName"
+          $blockmap = "$installer.blockmap"
+          $latest = "release/latest.yml"
+
+          foreach ($file in @($installer, $blockmap, $latest)) {
+            if (-not (Test-Path $file)) { throw "Missing release asset: $file" }
+          }
+          if ((Get-Item $installer).Length -lt 10MB) {
+            throw "Installer is unexpectedly small."
+          }
+
+          $latestText = Get-Content $latest -Raw
+          $latestText = [regex]::Replace($latestText, '(?m)^stagingPercentage:\s*\d+\s*\r?\n?', '')
+          if ([int]$env:ROLLOUT -lt 100) {
+            $latestText = $latestText.TrimEnd() + "`nstagingPercentage: $env:ROLLOUT`n"
+          }
+          Set-Content -Encoding utf8 $latest $latestText
+
+          $latestText = Get-Content $latest -Raw
+          if ($latestText -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") {
+            throw "latest.yml does not contain version $env:VERSION."
+          }
+          if ($latestText -notmatch [regex]::Escape($installerName)) {
+            throw "latest.yml does not reference $installerName."
+          }
+          if ([int]$env:ROLLOUT -lt 100 -and $latestText -notmatch "(?m)^stagingPercentage:\s*$env:ROLLOUT\s*$") {
+            throw "latest.yml staged rollout was not applied."
+          }
+
+          $signature = Get-AuthenticodeSignature $installer
+          $signing = if ([string]::IsNullOrWhiteSpace($env:CSC_LINK)) { 'unsigned' } else { 'signed' }
+          if ($signing -eq 'signed' -and $signature.Status -ne 'Valid') {
+            throw "A signing certificate was provided but Authenticode validation failed: $($signature.Status)."
+          }
+
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $installerName" | Set-Content -Encoding ascii release/SHA256SUMS.txt
+
+          $blocked = @($env:BLOCKED.Split(',') | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+          foreach ($bad in $blocked) {
+            if ($bad -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid blocked version: $bad" }
+          }
+          $policy = [ordered]@{
+            schema = 1
+            latestVersion = $env:VERSION
+            minimumSupportedVersion = $(if ($env:MINIMUM) { $env:MINIMUM } else { $null })
+            rolloutPercentage = [int]$env:ROLLOUT
+            blockedVersions = $blocked
+            paused = $false
+            feed = 'github-releases'
+            repository = '${{ github.repository }}'
+            generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+          }
+          $policy | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release/update-policy.json
+
+          "installer_name=$installerName" >> $env:GITHUB_OUTPUT
+          "installer_bytes=$((Get-Item $installer).Length)" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "signing=$signing" >> $env:GITHUB_OUTPUT
+
+      - name: Publish or repair controlled release
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ROLLOUT: ${{ steps.controls.outputs.rollout }}
+          SIGNING: ${{ steps.artifacts.outputs.signing }}
+          OPERATOR_NOTE: ${{ inputs.release_notes }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $note = if ($env:OPERATOR_NOTE) { "`n$env:OPERATOR_NOTE`n" } else { "" }
+          @"
+          # Forge Studio $env:TAG
+
+          Controlled Windows release.$note
+          - Rollout: $env:ROLLOUT%
+          - Installer signing: $env:SIGNING
+          - Installer: Forge-Studio-Setup-$env:VERSION-x64.exe
+          - Delta metadata: blockmap + latest.yml
+          - Integrity: SHA256SUMS.txt
+          - Update policy snapshot: update-policy.json
+          "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
+
+          $assets = @(
+            "release/Forge-Studio-Setup-$env:VERSION-x64.exe",
+            "release/Forge-Studio-Setup-$env:VERSION-x64.exe.blockmap",
+            "release/latest.yml",
+            "release/SHA256SUMS.txt",
+            "release/update-policy.json"
+          )
+
+          if (gh release view $env:TAG --repo "${{ github.repository }}" 2>$null) {
+            gh release upload $env:TAG @assets --repo "${{ github.repository }}" --clobber
+          } else {
+            gh release create $env:TAG @assets `
+              --repo "${{ github.repository }}" `
+              --target main `
+              --title "Forge Studio $env:TAG" `
+              --notes-file release/RELEASE_NOTES.md `
+              --latest
+          }
+
+      - name: Verify public release feed
+        shell: pwsh
+        working-directory: forge-src
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+          ROLLOUT: ${{ steps.controls.outputs.rollout }}
+          INSTALLER_NAME: ${{ steps.artifacts.outputs.installer_name }}
+          EXPECTED_SHA256: ${{ steps.artifacts.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          Remove-Item verify -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force verify | Out-Null
+          gh release download $env:TAG --repo "${{ github.repository }}" --dir verify
+
+          foreach ($file in @(
+            "verify/$env:INSTALLER_NAME",
+            "verify/$env:INSTALLER_NAME.blockmap",
+            "verify/latest.yml",
+            "verify/SHA256SUMS.txt",
+            "verify/update-policy.json"
+          )) {
+            if (-not (Test-Path $file)) { throw "Published asset missing: $file" }
+          }
+
+          $actual = (Get-FileHash "verify/$env:INSTALLER_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $publishedExpected = (Get-Content verify/SHA256SUMS.txt -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          if ($actual -ne $env:EXPECTED_SHA256 -or $actual -ne $publishedExpected) {
+            throw "Checksum mismatch after publication."
+          }
+
+          $latestText = Get-Content verify/latest.yml -Raw
+          if ($latestText -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") {
+            throw "Published latest.yml has the wrong version."
+          }
+          if ([int]$env:ROLLOUT -lt 100 -and $latestText -notmatch "(?m)^stagingPercentage:\s*$env:ROLLOUT\s*$") {
+            throw "Published latest.yml lost its rollout percentage."
+          }
+
+          $policy = Get-Content verify/update-policy.json -Raw | ConvertFrom-Json
+          if ($policy.latestVersion -ne $env:VERSION -or [int]$policy.rolloutPercentage -ne [int]$env:ROLLOUT) {
+            throw "Published update policy does not match the release."
+          }
+
+          Write-Host "Forge $env:VERSION verified publicly at $env:ROLLOUT% rollout."
