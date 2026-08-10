@@ -9,14 +9,14 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: forge-source-migration-035
   cancel-in-progress: false
 
 jobs:
-  migrate-test-push:
+  migrate-test-export:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -25,7 +25,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Configure private repository access
+      - name: Configure private source access
         shell: bash
         env:
           SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
@@ -43,7 +43,7 @@ jobs:
           git clone --depth 1 --branch feat/forge-034-real-workbench https://github.com/Ratwaredev/ratlab.git source
           test "$(node -p "require('./source/package.json').version")" = "0.34.0"
 
-      - name: Convert source to Forge 0.35
+      - name: Convert and validate Forge 0.35
         shell: bash
         run: |
           set -euo pipefail
@@ -68,27 +68,68 @@ jobs:
           npm test
           node scripts/visual-check-034.mjs
 
-      - name: Publish verified source to forgestudio migration branch
+      - name: Package and encrypt verified source
         shell: bash
         run: |
           set -euo pipefail
-          git clone --depth 1 --branch migration/forge-035-clean-zip https://github.com/Ratwaredev/forgestudio.git target
-          rsync -a --delete \
-            --exclude '.git' \
-            --exclude 'node_modules' \
-            --exclude 'release' \
-            --exclude 'data' \
-            --exclude 'artifacts' \
-            --exclude 'workspace' \
-            source/ target/
-          cd target
-          git config user.name 'forge-release-bot'
-          git config user.email 'forge-release-bot@users.noreply.github.com'
-          git add -A
-          git diff --cached --check
-          if git diff --cached --quiet; then
-            echo 'No migration changes.'
-            exit 0
-          fi
-          git commit -m 'Forge 0.35: canonical source and clean ZIP replacement'
-          git push origin HEAD:migration/forge-035-clean-zip
+          tar -czf forge-035-source.tar.gz \
+            --exclude='.git' \
+            --exclude='node_modules' \
+            --exclude='release' \
+            --exclude='data' \
+            --exclude='artifacts' \
+            --exclude='workspace' \
+            -C source .
+          cat > bootstrap-cert.pem <<'CERT'
+          -----BEGIN CERTIFICATE-----
+          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
+          -----END CERTIFICATE-----
+          CERT
+          sed -i 's/^          //' bootstrap-cert.pem
+          openssl cms -encrypt -binary -aes-256-cbc -outform DER \
+            -in forge-035-source.tar.gz \
+            -out forge-035-source.tar.gz.cms \
+            bootstrap-cert.pem
+          sha256sum forge-035-source.tar.gz.cms
+          ls -lh forge-035-source.tar.gz forge-035-source.tar.gz.cms
+
+      - name: Publish temporary encrypted bootstrap asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: forge-source-bootstrap-035-20260810
+        run: |
+          set -euo pipefail
+          gh release delete "$TAG" --repo "${{ github.repository }}" --cleanup-tag -y >/dev/null 2>&1 || true
+          gh release create "$TAG" forge-035-source.tar.gz.cms \
+            --repo "${{ github.repository }}" \
+            --title 'Forge 0.35 encrypted source bootstrap (temporary)' \
+            --notes 'Temporary encrypted migration bridge. Contains no usable plaintext source without the private migration key.' \
+            --prerelease
