@@ -1,4 +1,4 @@
-name: Bootstrap Forge 0.32 release
+name: Bootstrap Forge 0.32.1 release
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Dispatch controlled Forge 0.32 release
+      - name: Dispatch controlled Forge 0.32.1 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -25,7 +25,7 @@ jobs:
             --ref main \
             -f source_ref=main \
             -f rollout_percentage=100 \
-            -f minimum_supported_version=0.30.0 \
+            -f minimum_supported_version=0.31.0 \
             -f blocked_versions= \
-            -f release_notes='Forge 0.32: persistent encrypted desktop login, professional workbench UI, compact projects, inspector, command palette and safer workspace navigation.'
-          echo 'Controlled Forge 0.32 release dispatched.'
+            -f release_notes='Forge 0.32.1: Forge-only navigation, one unified Biblioteca surface, RatLab separated from Forge UI, shared registry preserved internally.'
+          echo 'Controlled Forge 0.32.1 release dispatched.'
