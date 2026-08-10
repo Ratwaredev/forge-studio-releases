@@ -1,4 +1,4 @@
-name: Bootstrap Forge 0.32.1 release
+name: Bootstrap Forge 0.34.0 release
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Dispatch controlled Forge 0.32.1 release
+      - name: Dispatch controlled Forge 0.34.0 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -23,9 +23,9 @@ jobs:
           gh workflow run controlled-release.yml \
             --repo "${{ github.repository }}" \
             --ref main \
-            -f source_ref=main \
+            -f source_ref=feat/forge-034-real-workbench \
             -f rollout_percentage=100 \
             -f minimum_supported_version=0.31.0 \
             -f blocked_versions= \
-            -f release_notes='Forge 0.32.1: Forge-only navigation, one unified Biblioteca surface, RatLab separated from Forge UI, shared registry preserved internally.'
-          echo 'Controlled Forge 0.32.1 release dispatched.'
+            -f release_notes='Forge 0.34.0: simplified Preview/Code/Terminal workbench, Monaco editing with immutable snapshots, xterm process output, and guarded repair for legacy snapshot checksum metadata. RatLab source remains separated.'
+          echo 'Controlled Forge 0.34.0 release dispatched.'
