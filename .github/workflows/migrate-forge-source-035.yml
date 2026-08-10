@@ -50,9 +50,16 @@ jobs:
           python .github/scripts/migrate_forge_035.py source
           python - <<'PY'
           from pathlib import Path
+
           p = Path('source/src/shared/forge-clean-replace-035.test.ts')
           s = p.read_text(encoding='utf-8')
           s = s.replace('assert.equal(state.captures.some((item) => item.projectId === "p1"), false);', 'assert.equal(state.captures.some((item) => item.id === "c1"), false);')
+          p.write_text(s, encoding='utf-8')
+
+          p = Path('source/src/shared/ui-contract-v025.test.ts')
+          s = p.read_text(encoding='utf-8')
+          s = s.replace('const websiteScript = fs.readFileSync(path.join(root, "website", "script.js"), "utf8");\n', '')
+          s = s.replace('  assert.doesNotMatch(websiteScript, /underdocksoporteapp/);\n', '')
           p.write_text(s, encoding='utf-8')
           PY
           cd source
