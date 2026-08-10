@@ -1,4 +1,4 @@
-name: Bootstrap Forge 0.31 release
+name: Bootstrap Forge 0.32 release
 
 on:
   push:
@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Dispatch controlled Forge 0.31 release
+      - name: Dispatch controlled Forge 0.32 release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -27,5 +27,5 @@ jobs:
             -f rollout_percentage=100 \
             -f minimum_supported_version=0.30.0 \
             -f blocked_versions= \
-            -f release_notes='Forge 0.31: resilient packaged email auth and controlled desktop updates.'
-          echo 'Controlled Forge 0.31 release dispatched.'
+            -f release_notes='Forge 0.32: persistent encrypted desktop login, professional workbench UI, compact projects, inspector, command palette and safer workspace navigation.'
+          echo 'Controlled Forge 0.32 release dispatched.'
