@@ -1,0 +1,181 @@
+name: Release current clean Forge source
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-source-current.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-source-current-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout clean Forge source
+        uses: actions/checkout@v6
+        with:
+          ref: source-current
+          path: forge-src
+          fetch-depth: 1
+
+      - name: Read source identity
+        id: source
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = Get-Content forge-src/package.json -Raw | ConvertFrom-Json
+          $version = [string]$package.version
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Invalid Forge version: $version" }
+          $sourceCommit = if (Test-Path forge-src/.forge-source-commit) { (Get-Content forge-src/.forge-source-commit -Raw).Trim() } else { (git -C forge-src rev-parse HEAD).Trim() }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          "source_commit=$sourceCommit" >> $env:GITHUB_OUTPUT
+
+      - name: Check release state
+        id: existing
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.source.outputs.tag }}
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $required = @(
+            "Forge-Studio-Setup-$env:VERSION-x64.exe",
+            "Forge-Studio-Setup-$env:VERSION-x64.exe.blockmap",
+            'latest.yml',
+            'SHA256SUMS.txt'
+          )
+          $complete = $false
+          if (gh release view $env:TAG --repo "${{ github.repository }}" 2>$null) {
+            $assets = @(gh release view $env:TAG --repo "${{ github.repository }}" --json assets --jq '.assets[].name')
+            $complete = $true
+            foreach ($name in $required) {
+              if ($assets -notcontains $name) { $complete = $false }
+            }
+          }
+          "complete=$($complete.ToString().ToLowerInvariant())" >> $env:GITHUB_OUTPUT
+
+      - uses: actions/setup-node@v6
+        if: steps.existing.outputs.complete != 'true'
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: forge-src/package-lock.json
+
+      - name: Install dependencies
+        if: steps.existing.outputs.complete != 'true'
+        working-directory: forge-src
+        run: npm ci
+
+      - name: Validate Forge
+        if: steps.existing.outputs.complete != 'true'
+        working-directory: forge-src
+        run: npm test
+
+      - name: Verify updater contract
+        if: steps.existing.outputs.complete != 'true'
+        working-directory: forge-src
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($null -eq $package.dependencies.'electron-updater') { throw 'electron-updater missing' }
+          $provider = @($package.build.publish)[0]
+          if ($provider.provider -ne 'github' -or $provider.owner -ne 'Ratwaredev' -or $provider.repo -ne 'forge-studio-releases') { throw 'Wrong updater repository' }
+          $main = Get-Content desktop/main.cjs -Raw
+          foreach ($contract in @('autoUpdater.autoDownload = true','autoUpdater.autoInstallOnAppQuit = true','checkForUpdates()','4 * 60 * 60 * 1_000')) {
+            if (-not $main.Contains($contract)) { throw "Missing updater contract: $contract" }
+          }
+
+      - name: Build Windows installer
+        if: steps.existing.outputs.complete != 'true'
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist:win -- --publish never
+
+      - name: Validate local release files
+        if: steps.existing.outputs.complete != 'true'
+        id: built
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "Forge-Studio-Setup-$env:VERSION-x64.exe"
+          $installer = "release/$name"
+          foreach ($file in @($installer,"$installer.blockmap",'release/latest.yml')) {
+            if (-not (Test-Path $file)) { throw "Missing release asset: $file" }
+          }
+          $bytes = (Get-Item $installer).Length
+          if ($bytes -lt 10MB) { throw "Installer too small: $bytes" }
+          $latest = Get-Content release/latest.yml -Raw
+          if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'latest.yml has wrong version' }
+          if ($latest -notmatch [regex]::Escape($name)) { throw 'latest.yml does not reference installer' }
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+
+      - name: Publish release
+        if: steps.existing.outputs.complete != 'true'
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.source.outputs.version }}
+          TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @"
+          # Forge Studio $env:TAG
+
+          Stable Windows release with automatic updates.
+
+          - Game, Web and Tools surfaces
+          - Minimal project-first UI
+          - Asset Vault and deterministic validation
+          - Human-first workflow and bounded agent contracts
+          - Clean source commit: $env:SOURCE_COMMIT
+          "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
+          $installer = "release/Forge-Studio-Setup-$env:VERSION-x64.exe"
+          if (gh release view $env:TAG --repo "${{ github.repository }}" 2>$null) {
+            gh release upload $env:TAG $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --clobber
+          } else {
+            gh release create $env:TAG $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --title "Forge Studio $env:TAG" --notes-file release/RELEASE_NOTES.md --latest
+          }
+
+      - name: Verify public updater feed
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.source.outputs.version }}
+          TAG: ${{ steps.source.outputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item verify -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory verify | Out-Null
+          gh release download $env:TAG --repo "${{ github.repository }}" --dir verify
+          $name = "Forge-Studio-Setup-$env:VERSION-x64.exe"
+          foreach ($file in @("verify/$name","verify/$name.blockmap",'verify/latest.yml','verify/SHA256SUMS.txt')) {
+            if (-not (Test-Path $file)) { throw "Published asset missing: $file" }
+          }
+          $actual = (Get-FileHash "verify/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $declared = (Get-Content verify/SHA256SUMS.txt -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          if ($actual -ne $declared) { throw 'Published checksum mismatch' }
+          $latest = Get-Content verify/latest.yml -Raw
+          if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'Published latest.yml has wrong version' }
+          if ($latest -notmatch [regex]::Escape($name)) { throw 'Published latest.yml does not reference installer' }
+          Write-Host "Verified Forge $env:TAG · $actual"
