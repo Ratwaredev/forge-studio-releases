@@ -1,4 +1,4 @@
-# Builds the latest verified Forge source from Ratwaredev/forgestudio.
+# Builds the latest verified Forge source snapshot prepared by Ratwaredev/forgestudio CI.
 name: Build and publish Forge Studio
 
 on:
@@ -22,32 +22,32 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Clone canonical Forge source
+      - name: Fetch verified Forge source snapshot
         id: source
         shell: pwsh
         env:
-          FORGE_SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
+          SOURCE_URL: https://raw.githubusercontent.com/Ratwaredev/forgestudio/release-source/.forge-delivery/forge-studio-public-source.zip?token=A7LWGN45SUGF5ECCYGPOKXDKPXT23AA
+          SOURCE_SHA: 6e8453f2966658b3d3e4c371368f26b747b3e282
+          SOURCE_ZIP_SHA256: 0f82f1555e3320df6f948c550263aafe5f31e451d9b0040d4290815782d4d708
         run: |
           $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:FORGE_SOURCE_TOKEN)) {
-            throw "Missing private Forge source token."
+          Invoke-WebRequest -Uri $env:SOURCE_URL -OutFile forge-source.zip
+          $actual = (Get-FileHash forge-source.zip -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $env:SOURCE_ZIP_SHA256) {
+            throw "Verified Forge source checksum mismatch."
           }
-
-          $credentials = "x-access-token:$env:FORGE_SOURCE_TOKEN"
-          $encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($credentials))
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $encoded" `
-            clone --depth 1 --branch main `
-            https://github.com/Ratwaredev/forgestudio.git forge-src
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to clone Ratwaredev/forgestudio main."
+          New-Item -ItemType Directory -Force forge-src | Out-Null
+          Expand-Archive -Path forge-source.zip -DestinationPath forge-src -Force
+          if (-not (Test-Path forge-src/package.json)) {
+            throw "Verified Forge source snapshot does not contain package.json at root."
           }
-
           $sourceVersion = node -p "require('./forge-src/package.json').version"
-          $sourceSha = (git -C forge-src rev-parse HEAD).Trim()
-          Write-Host "Forge source cloned. Version: $sourceVersion · $sourceSha"
+          if ($sourceVersion -ne '0.38.0') {
+            throw "Expected Forge 0.38.0, got $sourceVersion"
+          }
+          Write-Host "Verified Forge source loaded. Version: $sourceVersion · $env:SOURCE_SHA"
           "version=$sourceVersion" >> $env:GITHUB_OUTPUT
-          "sha=$sourceSha" >> $env:GITHUB_OUTPUT
+          "sha=$env:SOURCE_SHA" >> $env:GITHUB_OUTPUT
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -158,6 +158,7 @@ jobs:
           - Game, Web and Tools product surfaces
           - Minimal project-first UI
           - Asset Vault with LOD generation and 3D Source/LOD preview
+          - One-minute human quickstart and coding-agent onboarding
           - Godot benchmark and deterministic validation gates
           - Installer: Forge-Studio-Setup-$env:VERSION-x64.exe
           - Update metadata: latest.yml + blockmap
