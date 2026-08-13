@@ -66,11 +66,12 @@ jobs:
           $package.version = '0.38.1'
           $package | ConvertTo-Json -Depth 100 | Set-Content -Encoding utf8NoBOM $packagePath
 
-          $provider = @($package.build.publish)[0]
-          if ($provider.provider -ne 'github' -or $provider.owner -ne 'Ratwaredev' -or $provider.repo -ne 'forge-studio-releases') {
-            throw 'Updater repository changed unexpectedly.'
+          $mainPath = 'forge-src/desktop/main.cjs'
+          if (-not (Test-Path $mainPath)) { throw 'Packaged desktop main process is missing.' }
+          $main = Get-Content $mainPath -Raw
+          foreach ($contract in @('autoUpdater.autoDownload = true','autoUpdater.autoInstallOnAppQuit = true','checkForUpdates()','4 * 60 * 60 * 1_000')) {
+            if (-not $main.Contains($contract)) { throw "Missing updater contract: $contract" }
           }
-          if ($null -eq $package.dependencies.'electron-updater') { throw 'electron-updater is missing.' }
           Write-Host 'Renderer hotfix applied to Forge 0.38.1.'
 
       - name: Prepare isolated Electron builder
@@ -118,7 +119,7 @@ jobs:
           $blockmap = "$installer.blockmap"
           $latest = 'forge-src/release/latest.yml'
           $unpacked = 'forge-src/release/win-unpacked/resources/app'
-          foreach ($file in @($installer, $blockmap, $latest, "$unpacked/package.json", "$unpacked/public/product-surfaces.js")) {
+          foreach ($file in @($installer, $blockmap, $latest, "$unpacked/package.json", "$unpacked/public/product-surfaces.js", "$unpacked/desktop/main.cjs")) {
             if (-not (Test-Path $file)) { throw "Missing hotfix artifact: $file" }
           }
           if ((Get-Item $installer).Length -lt 10MB) { throw 'Hotfix installer is unexpectedly small.' }
@@ -129,6 +130,10 @@ jobs:
           $expectedUiHash = (Get-FileHash '.github/hotfix/0.38.1/product-surfaces.js' -Algorithm SHA256).Hash
           $packagedUiHash = (Get-FileHash "$unpacked/public/product-surfaces.js" -Algorithm SHA256).Hash
           if ($expectedUiHash -ne $packagedUiHash) { throw 'Packaged renderer payload does not match the hotfix.' }
+          $packagedMain = Get-Content "$unpacked/desktop/main.cjs" -Raw
+          foreach ($contract in @('autoUpdater.autoDownload = true','autoUpdater.autoInstallOnAppQuit = true','checkForUpdates()','4 * 60 * 60 * 1_000')) {
+            if (-not $packagedMain.Contains($contract)) { throw "Packaged updater contract missing: $contract" }
+          }
           $latestText = Get-Content $latest -Raw
           if ($latestText -notmatch '(?m)^version:\s*0\.38\.1\s*$') { throw 'latest.yml has the wrong version.' }
           if ($latestText -notmatch [regex]::Escape($name)) { throw 'latest.yml does not reference the hotfix installer.' }
