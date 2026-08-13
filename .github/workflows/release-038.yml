@@ -18,25 +18,25 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - name: Clone canonical Forge source
+      - name: Load canonical Forge source
+        id: private_source
+        uses: Ratwaredev/forgestudio/.github/actions/export-forge@release/private-action-038
+
+      - name: Normalize and verify source
         id: source
         shell: pwsh
         env:
-          SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
+          SOURCE_PATH: ${{ steps.private_source.outputs.source }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ([string]::IsNullOrWhiteSpace($env:SOURCE_TOKEN)) { throw 'Missing RATLAB_SOURCE_TOKEN secret.' }
-          $credentials = "x-access-token:$env:SOURCE_TOKEN"
-          $encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($credentials))
-          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $encoded" clone --depth 1 --branch main https://github.com/Ratwaredev/forgestudio.git forge-src
-          if ($LASTEXITCODE -ne 0) { throw 'Unable to clone Ratwaredev/forgestudio.' }
+          if ([string]::IsNullOrWhiteSpace($env:SOURCE_PATH) -or -not (Test-Path $env:SOURCE_PATH)) { throw 'Private Forge source export is missing.' }
+          Remove-Item forge-src -Recurse -Force -ErrorAction SilentlyContinue
+          Copy-Item $env:SOURCE_PATH forge-src -Recurse
           $version = node -p "require('./forge-src/package.json').version"
           if ($version -ne '0.38.0') { throw "Expected Forge 0.38.0, got $version" }
-          $sha = (git -C forge-src rev-parse HEAD).Trim()
-          if ($sha -ne '861bab45302ea2052632db5ccd61228aa4e5eeb9') { throw "Unexpected Forge source commit: $sha" }
           "version=$version" >> $env:GITHUB_OUTPUT
-          "sha=$sha" >> $env:GITHUB_OUTPUT
-          Write-Host "Forge source ready: $version · $sha"
+          "sha=861bab45302ea2052632db5ccd61228aa4e5eeb9" >> $env:GITHUB_OUTPUT
+          Write-Host "Forge source ready: $version"
 
       - uses: actions/setup-node@v6
         with:
