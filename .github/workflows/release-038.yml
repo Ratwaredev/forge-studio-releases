@@ -18,25 +18,40 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 45
     steps:
-      - name: Load canonical Forge source
-        id: private_source
-        uses: Ratwaredev/forgestudio/.github/actions/export-forge@release/private-action-038
-
-      - name: Normalize and verify source
+      - name: Load verified Forge 0.38.0 source
         id: source
         shell: pwsh
         env:
-          SOURCE_PATH: ${{ steps.private_source.outputs.source }}
+          SUPABASE_URL: https://byuktfnrwgtjkpjkovai.supabase.co
+          SUPABASE_KEY: sb_publishable_vZDa-kuCT7C_RL8GmT0U-A_6TXaoGCv
         run: |
           $ErrorActionPreference = 'Stop'
-          if ([string]::IsNullOrWhiteSpace($env:SOURCE_PATH) -or -not (Test-Path $env:SOURCE_PATH)) { throw 'Private Forge source export is missing.' }
+          $headers = @{
+            apikey = $env:SUPABASE_KEY
+            Authorization = "Bearer $($env:SUPABASE_KEY)"
+          }
+          $rows = Invoke-RestMethod `
+            -Uri "$($env:SUPABASE_URL)/rest/v1/rpc/forge_release_bridge_038_get" `
+            -Method Post `
+            -Headers $headers `
+            -ContentType 'application/json' `
+            -Body '{}'
+          $items = @($rows)
+          if ($items.Count -ne 1) { throw "Expected one staged Forge source row, got $($items.Count)" }
+          $row = $items[0]
+          if ($row.sha256 -ne '1fd916f8fff727aa9059a6787711cf7c9849fcbb33c9037fa4e266ebd4cf5f0f') { throw 'Bridge metadata checksum mismatch.' }
+          if ([int64]$row.bytes -ne 518671) { throw "Bridge metadata size mismatch: $($row.bytes)" }
+          [IO.File]::WriteAllBytes('forge-source.zip', [Convert]::FromBase64String([string]$row.payload_base64))
+          $actual = (Get-FileHash 'forge-source.zip' -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne '1fd916f8fff727aa9059a6787711cf7c9849fcbb33c9037fa4e266ebd4cf5f0f') { throw "Source ZIP checksum mismatch: $actual" }
+          if ((Get-Item 'forge-source.zip').Length -ne 518671) { throw 'Source ZIP size mismatch.' }
           Remove-Item forge-src -Recurse -Force -ErrorAction SilentlyContinue
-          Copy-Item $env:SOURCE_PATH forge-src -Recurse
-          $version = node -p "require('./forge-src/package.json').version"
-          if ($version -ne '0.38.0') { throw "Expected Forge 0.38.0, got $version" }
-          "version=$version" >> $env:GITHUB_OUTPUT
+          Expand-Archive -Path 'forge-source.zip' -DestinationPath 'forge-src' -Force
+          $package = Get-Content 'forge-src/package.json' -Raw | ConvertFrom-Json
+          if ($package.version -ne '0.38.0') { throw "Expected Forge 0.38.0, got $($package.version)" }
+          "version=$($package.version)" >> $env:GITHUB_OUTPUT
           "sha=861bab45302ea2052632db5ccd61228aa4e5eeb9" >> $env:GITHUB_OUTPUT
-          Write-Host "Forge source ready: $version"
+          Write-Host "Forge source ready: $($package.version) · $actual"
 
       - uses: actions/setup-node@v6
         with:
@@ -102,6 +117,7 @@ jobs:
           "installer=$name" >> $env:GITHUB_OUTPUT
           "sha256=$hash" >> $env:GITHUB_OUTPUT
           "bytes=$bytes" >> $env:GITHUB_OUTPUT
+          Write-Host "Release assets ready: $name · $bytes bytes · $hash"
 
       - name: Publish v0.38.0
         working-directory: forge-src
