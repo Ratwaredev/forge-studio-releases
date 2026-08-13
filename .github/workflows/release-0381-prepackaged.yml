@@ -1,0 +1,203 @@
+name: Release Forge 0.38.1 prepackaged hotfix
+
+on:
+  push:
+    branches: [hotfix-forge-0381-repack]
+    paths:
+      - '.github/workflows/release-0381-prepackaged.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-0381-prepackaged
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install public 0.38.0 base
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $base = Join-Path $env:RUNNER_TEMP 'forge-base'
+          $install = Join-Path $env:RUNNER_TEMP 'forge-hotfix-app'
+          New-Item -ItemType Directory -Force $base | Out-Null
+          Remove-Item $install -Recurse -Force -ErrorAction SilentlyContinue
+          gh release download v0.38.0 --repo "${{ github.repository }}" --pattern 'Forge-Studio-Setup-0.38.0-x64.exe' --dir $base
+          $installer = Join-Path $base 'Forge-Studio-Setup-0.38.0-x64.exe'
+          $process = Start-Process -FilePath $installer -ArgumentList '/S', "/D=$install" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "0.38.0 installer exited with $($process.ExitCode)." }
+          $app = Join-Path $install 'resources\app'
+          if (-not (Test-Path (Join-Path $app 'package.json'))) { throw 'Installed 0.38.0 app payload missing.' }
+          if ((node -p "require('$($app.Replace('\','/'))/package.json').version") -ne '0.38.0') { throw 'Installed base is not 0.38.0.' }
+          "install=$install" >> $env:GITHUB_ENV
+          "app=$app" >> $env:GITHUB_ENV
+
+      - name: Apply renderer-only 0.38.1 patch
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $target = Join-Path $env:app 'public\product-surfaces.js'
+          $before = Get-Content $target -Raw
+          if ($before -notmatch 'MutationObserver') { throw '0.38.0 base does not contain the expected renderer regression.' }
+          $payload = '.github/hotfix/0.38.1/product-surfaces.js'
+          $stable = Get-Content $payload -Raw
+          if ($stable -match 'MutationObserver') { throw 'Stable renderer payload still contains MutationObserver.' }
+          Copy-Item $payload $target -Force
+
+          $packagePath = Join-Path $env:app 'package.json'
+          $package = Get-Content $packagePath -Raw | ConvertFrom-Json
+          $package.version = '0.38.1'
+          $package | ConvertTo-Json -Depth 100 | Set-Content -Encoding utf8NoBOM $packagePath
+
+          foreach ($htmlName in @('index.html','library.html')) {
+            $htmlPath = Join-Path $env:app "public\$htmlName"
+            if (-not (Test-Path $htmlPath)) { throw "Missing $htmlName" }
+            $html = Get-Content $htmlPath -Raw
+            $html = $html.Replace('product-surfaces.js?build=forge-v0370-products','product-surfaces.js?build=forge-v0381-renderer-hotfix')
+            Set-Content -Encoding utf8NoBOM $htmlPath $html
+            if ((Get-Content $htmlPath -Raw) -notmatch 'forge-v0381-renderer-hotfix') { throw "Cache-buster patch failed for $htmlName" }
+          }
+
+          $main = Get-Content (Join-Path $env:app 'desktop\main.cjs') -Raw
+          foreach ($contract in @('autoUpdater.autoDownload = true','autoUpdater.autoInstallOnAppQuit = true','checkForUpdates()','4 * 60 * 60 * 1_000')) {
+            if (-not $main.Contains($contract)) { throw "Updater contract missing after patch: $contract" }
+          }
+          if ((Get-Content $target -Raw) -match 'MutationObserver') { throw 'Renderer regression survived hotfix patch.' }
+          if ((node -p "require('$($env:app.Replace('\','/'))/package.json').version") -ne '0.38.1') { throw 'Hotfix app payload did not become 0.38.1.' }
+          Write-Host 'FORGE_0381_PATCH_OK'
+
+      - name: Prepare NSIS wrapper
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Remove-Item builder -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory builder | Out-Null
+          Push-Location builder
+          @'
+          {
+            "name": "forge-studio",
+            "version": "0.38.1",
+            "description": "Forge Studio renderer hotfix",
+            "author": "Ratwaredev",
+            "license": "MIT",
+            "devDependencies": {
+              "electron-builder": "26.15.3"
+            },
+            "build": {
+              "appId": "com.ratwaredev.forgestudio",
+              "productName": "Forge Studio",
+              "electronVersion": "43.2.0",
+              "generateUpdatesFilesForAllChannels": true,
+              "directories": { "output": "release" },
+              "win": { "target": ["nsis"] },
+              "nsis": {
+                "oneClick": false,
+                "perMachine": false,
+                "allowToChangeInstallationDirectory": true,
+                "createDesktopShortcut": true,
+                "createStartMenuShortcut": true,
+                "deleteAppDataOnUninstall": false,
+                "artifactName": "Forge-Studio-Setup-${version}-${arch}.${ext}"
+              },
+              "publish": [{
+                "provider": "github",
+                "owner": "Ratwaredev",
+                "repo": "forge-studio-releases",
+                "releaseType": "release"
+              }]
+            }
+          }
+          '@ | Set-Content -Encoding utf8NoBOM package.json
+          npm install
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to install electron-builder.' }
+          Pop-Location
+
+      - name: Wrap patched app as 0.38.1
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $builder = Resolve-Path 'builder/node_modules/.bin/electron-builder.cmd'
+          Push-Location builder
+          & $builder --prepackaged "$env:install" --win nsis --x64 --publish never
+          $code = $LASTEXITCODE
+          Pop-Location
+          if ($code -ne 0) { throw 'electron-builder prepackaged NSIS build failed.' }
+
+      - name: Validate hotfix artifacts
+        id: validate
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = 'Forge-Studio-Setup-0.38.1-x64.exe'
+          $installer = "builder/release/$name"
+          $blockmap = "$installer.blockmap"
+          $latest = 'builder/release/latest.yml'
+          foreach ($file in @($installer,$blockmap,$latest)) {
+            if (-not (Test-Path $file)) { throw "Missing hotfix artifact: $file" }
+          }
+          if ((Get-Item $installer).Length -lt 10MB) { throw 'Hotfix installer is unexpectedly small.' }
+          $latestText = Get-Content $latest -Raw
+          if ($latestText -notmatch '(?m)^version:\s*0\.38\.1\s*$') { throw 'latest.yml version is not 0.38.1.' }
+          if ($latestText -notmatch [regex]::Escape($name)) { throw 'latest.yml does not reference the 0.38.1 installer.' }
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Encoding ascii 'builder/release/SHA256SUMS.txt'
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          Write-Host "FORGE_0381_ARTIFACT_OK $hash"
+
+      - name: Publish and independently verify v0.38.1
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA256: ${{ steps.validate.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = 'v0.38.1'
+          $name = 'Forge-Studio-Setup-0.38.1-x64.exe'
+          $installer = "builder/release/$name"
+          @"
+          # Forge Studio v0.38.1
+
+          Emergency renderer hotfix for the 0.38.0 UI freeze.
+
+          - Removes the document-wide MutationObserver introduced in 0.38.0.
+          - Restores the last-known-good 0.37 product-surface renderer.
+          - Busts the cached product-surface script URL so 0.38.0 cannot survive in Chromium cache.
+          - Keeps the 0.38 Electron runtime, updater, backend, Asset Vault and project runtime unchanged.
+          - Canonical hotfix source: Ratwaredev/forgestudio@4f76a3b2e26a291683b858842be0e81d8c60b849
+          "@ | Set-Content -Encoding utf8 'builder/release/RELEASE_NOTES.md'
+          $assets = @($installer,"$installer.blockmap",'builder/release/latest.yml','builder/release/SHA256SUMS.txt')
+          if (gh release view $tag --repo "${{ github.repository }}" 2>$null) {
+            gh release upload $tag @assets --repo "${{ github.repository }}" --clobber
+            gh release edit $tag --repo "${{ github.repository }}" --title 'Forge Studio v0.38.1' --notes-file 'builder/release/RELEASE_NOTES.md' --latest
+          } else {
+            gh release create $tag @assets --repo "${{ github.repository }}" --target main --title 'Forge Studio v0.38.1' --notes-file 'builder/release/RELEASE_NOTES.md' --latest
+          }
+
+          Remove-Item verify -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory verify | Out-Null
+          gh release download $tag --repo "${{ github.repository }}" --dir verify
+          foreach ($file in @("verify/$name","verify/$name.blockmap",'verify/latest.yml','verify/SHA256SUMS.txt')) {
+            if (-not (Test-Path $file)) { throw "Published asset missing: $file" }
+          }
+          $actual = (Get-FileHash "verify/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $declared = (Get-Content 'verify/SHA256SUMS.txt' -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          if ($actual -ne $env:EXPECTED_SHA256 -or $actual -ne $declared) { throw 'Published hotfix checksum mismatch.' }
+          $latestText = Get-Content 'verify/latest.yml' -Raw
+          if ($latestText -notmatch '(?m)^version:\s*0\.38\.1\s*$') { throw 'Published latest.yml is not 0.38.1.' }
+          if ($latestText -notmatch [regex]::Escape($name)) { throw 'Published latest.yml does not reference 0.38.1.' }
+          Write-Host "FORGE_0381_RELEASE_OK $actual"
