@@ -3,7 +3,7 @@ name: Release Forge 0.38.0
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [release/forge-038-direct]
     paths: ['.github/workflows/release-038.yml']
 
 permissions:
