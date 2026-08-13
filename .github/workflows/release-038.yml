@@ -1,0 +1,157 @@
+name: Release Forge 0.38.0
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/release-038.yml']
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-038-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Clone canonical Forge source
+        id: source
+        shell: pwsh
+        env:
+          SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:SOURCE_TOKEN)) { throw 'Missing RATLAB_SOURCE_TOKEN secret.' }
+          $credentials = "x-access-token:$env:SOURCE_TOKEN"
+          $encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($credentials))
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $encoded" clone --depth 1 --branch main https://github.com/Ratwaredev/forgestudio.git forge-src
+          if ($LASTEXITCODE -ne 0) { throw 'Unable to clone Ratwaredev/forgestudio.' }
+          $version = node -p "require('./forge-src/package.json').version"
+          if ($version -ne '0.38.0') { throw "Expected Forge 0.38.0, got $version" }
+          $sha = (git -C forge-src rev-parse HEAD).Trim()
+          if ($sha -ne '861bab45302ea2052632db5ccd61228aa4e5eeb9') { throw "Unexpected Forge source commit: $sha" }
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+          Write-Host "Forge source ready: $version · $sha"
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: forge-src/package-lock.json
+
+      - name: Install dependencies
+        working-directory: forge-src
+        run: npm ci
+
+      - name: Validate Forge
+        working-directory: forge-src
+        run: npm test
+
+      - name: Security audit
+        working-directory: forge-src
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Verify updater contract
+        working-directory: forge-src
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $package = Get-Content package.json -Raw | ConvertFrom-Json
+          if ($null -eq $package.dependencies.'electron-updater') { throw 'electron-updater missing' }
+          $provider = @($package.build.publish)[0]
+          if ($provider.provider -ne 'github' -or $provider.owner -ne 'Ratwaredev' -or $provider.repo -ne 'forge-studio-releases') { throw 'Wrong updater repository' }
+          $main = Get-Content desktop/main.cjs -Raw
+          foreach ($contract in @('autoUpdater.autoDownload = true','autoUpdater.autoInstallOnAppQuit = true','checkForUpdates()','4 * 60 * 60 * 1_000')) {
+            if (-not $main.Contains($contract)) { throw "Missing updater contract: $contract" }
+          }
+
+      - name: Build Windows installer
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npm run dist:win -- --publish never
+
+      - name: Validate release assets
+        id: built
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $name = "Forge-Studio-Setup-$env:VERSION-x64.exe"
+          $installer = "release/$name"
+          $blockmap = "$installer.blockmap"
+          $latest = 'release/latest.yml'
+          foreach ($file in @($installer,$blockmap,$latest)) {
+            if (-not (Test-Path $file)) { throw "Missing release asset: $file" }
+          }
+          $bytes = (Get-Item $installer).Length
+          if ($bytes -lt 10MB) { throw "Installer too small: $bytes" }
+          $latestText = Get-Content $latest -Raw
+          if ($latestText -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'latest.yml has wrong version' }
+          if ($latestText -notmatch [regex]::Escape($name)) { throw 'latest.yml does not reference installer' }
+          $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $name" | Set-Content -Encoding ascii release/SHA256SUMS.txt
+          "installer=$name" >> $env:GITHUB_OUTPUT
+          "sha256=$hash" >> $env:GITHUB_OUTPUT
+          "bytes=$bytes" >> $env:GITHUB_OUTPUT
+
+      - name: Publish v0.38.0
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.source.outputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "v$env:VERSION"
+          @"
+          # Forge Studio $tag
+
+          Stable Windows release with automatic updates.
+
+          - Game, Web and Tools product surfaces
+          - Asset Vault with LOD generation and interactive Source/LOD preview
+          - Deterministic validation and bounded agent contracts
+          - Canonical source: Ratwaredev/forgestudio@$env:SOURCE_SHA
+          "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
+          $installer = "release/Forge-Studio-Setup-$env:VERSION-x64.exe"
+          if (gh release view $tag --repo "${{ github.repository }}" 2>$null) {
+            gh release upload $tag $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --clobber
+            gh release edit $tag --repo "${{ github.repository }}" --title "Forge Studio $tag" --notes-file release/RELEASE_NOTES.md --latest
+          } else {
+            gh release create $tag $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --target main --title "Forge Studio $tag" --notes-file release/RELEASE_NOTES.md --latest
+          }
+
+      - name: Verify public updater feed
+        working-directory: forge-src
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.source.outputs.version }}
+          EXPECTED_SHA256: ${{ steps.built.outputs.sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = "v$env:VERSION"
+          $name = "Forge-Studio-Setup-$env:VERSION-x64.exe"
+          Remove-Item verify -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory verify | Out-Null
+          gh release download $tag --repo "${{ github.repository }}" --dir verify
+          foreach ($file in @("verify/$name","verify/$name.blockmap",'verify/latest.yml','verify/SHA256SUMS.txt')) {
+            if (-not (Test-Path $file)) { throw "Published asset missing: $file" }
+          }
+          $actual = (Get-FileHash "verify/$name" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $declared = (Get-Content verify/SHA256SUMS.txt -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          if ($actual -ne $env:EXPECTED_SHA256 -or $actual -ne $declared) { throw 'Published checksum mismatch' }
+          $latestText = Get-Content verify/latest.yml -Raw
+          if ($latestText -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'Published latest.yml has wrong version' }
+          if ($latestText -notmatch [regex]::Escape($name)) { throw 'Published latest.yml does not reference installer' }
+          Write-Host "FORGE_RELEASE_OK $tag $actual"
