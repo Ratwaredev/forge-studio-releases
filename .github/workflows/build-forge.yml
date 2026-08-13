@@ -1,4 +1,4 @@
-# Builds the latest verified Forge source from Ratwaredev/ratlab.
+# Builds the latest verified Forge source from Ratwaredev/forgestudio.
 name: Build and publish Forge Studio
 
 on:
@@ -22,28 +22,32 @@ jobs:
     timeout-minutes: 45
 
     steps:
-      - name: Clone private Forge source
+      - name: Clone canonical Forge source
+        id: source
         shell: pwsh
         env:
-          RATLAB_SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
+          FORGE_SOURCE_TOKEN: ${{ secrets.RATLAB_SOURCE_TOKEN }}
         run: |
           $ErrorActionPreference = "Stop"
-          if ([string]::IsNullOrWhiteSpace($env:RATLAB_SOURCE_TOKEN)) {
-            throw "Missing RATLAB_SOURCE_TOKEN secret."
+          if ([string]::IsNullOrWhiteSpace($env:FORGE_SOURCE_TOKEN)) {
+            throw "Missing private Forge source token."
           }
 
-          $credentials = "x-access-token:$env:RATLAB_SOURCE_TOKEN"
+          $credentials = "x-access-token:$env:FORGE_SOURCE_TOKEN"
           $encoded = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes($credentials))
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $encoded" `
             clone --depth 1 --branch main `
-            https://github.com/Ratwaredev/ratlab.git forge-src
+            https://github.com/Ratwaredev/forgestudio.git forge-src
 
           if ($LASTEXITCODE -ne 0) {
-            throw "Unable to clone the private Forge source repository."
+            throw "Unable to clone Ratwaredev/forgestudio main."
           }
 
           $sourceVersion = node -p "require('./forge-src/package.json').version"
-          Write-Host "Forge source cloned. Version: $sourceVersion"
+          $sourceSha = (git -C forge-src rev-parse HEAD).Trim()
+          Write-Host "Forge source cloned. Version: $sourceVersion · $sourceSha"
+          "version=$sourceVersion" >> $env:GITHUB_OUTPUT
+          "sha=$sourceSha" >> $env:GITHUB_OUTPUT
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -143,18 +147,22 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           VERSION: ${{ steps.release.outputs.version }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
         run: |
           $ErrorActionPreference = "Stop"
           @"
           # Forge Studio $env:RELEASE_TAG
 
-          Stable Windows installer with automatic updates.
+          Stable Windows release with automatic updates.
 
+          - Game, Web and Tools product surfaces
+          - Minimal project-first UI
+          - Asset Vault with LOD generation and 3D Source/LOD preview
+          - Godot benchmark and deterministic validation gates
           - Installer: Forge-Studio-Setup-$env:VERSION-x64.exe
-          - Update metadata: latest.yml
-          - Delta metadata: installer blockmap
+          - Update metadata: latest.yml + blockmap
           - Integrity: SHA256SUMS.txt
-          - Source repository: private
+          - Source commit: $env:SOURCE_SHA
           "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
 
           if (gh release view $env:RELEASE_TAG --repo "${{ github.repository }}" 2>$null) {
@@ -235,6 +243,7 @@ jobs:
         env:
           RELEASE_VERSION: ${{ steps.release.outputs.version }}
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          SOURCE_SHA: ${{ steps.source.outputs.sha }}
           INSTALLER_NAME: ${{ steps.release.outputs.installer_name }}
           INSTALLER_BYTES: ${{ steps.verify_public.outputs.verified_bytes }}
           INSTALLER_SHA256: ${{ steps.verify_public.outputs.verified_sha256 }}
@@ -272,7 +281,8 @@ jobs:
               tag: process.env.RELEASE_TAG || null,
               status: process.env.JOB_STATUS,
               runId: String(context.runId),
-              commit: context.sha,
+              releaseCommit: context.sha,
+              sourceCommit: process.env.SOURCE_SHA || null,
               installer: process.env.INSTALLER_NAME || null,
               installerBytes: Number(process.env.INSTALLER_BYTES || 0),
               sha256: process.env.INSTALLER_SHA256 || null,
