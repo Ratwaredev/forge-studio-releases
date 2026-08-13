@@ -1,14 +1,15 @@
 {
-  "version": "0.33.0",
-  "tag": "v0.33.0",
-  "status": "success",
-  "runId": "31346593729",
-  "commit": "5d3c6dc9651dfb10ee690d63dc8701c6ab5de5fc",
-  "installer": "Forge-Studio-Setup-0.33.0-x64.exe",
-  "installerBytes": 226600797,
-  "sha256": "6505d44a232e0237968c25dab9ec6db9ed0ad5bfb882484a4019da641e1207de",
-  "downloadUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.33.0/Forge-Studio-Setup-0.33.0-x64.exe",
-  "latestUrl": "https://github.com/Ratwaredev/forge-studio-releases/releases/download/v0.33.0/latest.yml",
+  "version": null,
+  "tag": null,
+  "status": "failure",
+  "runId": "31703018789",
+  "releaseCommit": "e7a30a63ed45478497ce9410a01d6aace3a61079",
+  "sourceCommit": null,
+  "installer": null,
+  "installerBytes": 0,
+  "sha256": null,
+  "downloadUrl": null,
+  "latestUrl": null,
   "updater": {
     "provider": "github",
     "repository": "Ratwaredev/forge-studio-releases",
@@ -17,5 +18,5 @@
     "autoDownload": true,
     "autoInstallOnQuit": true
   },
-  "recordedAt": "2026-08-10T01:17:32.654Z"
+  "recordedAt": "2026-08-13T13:03:35.850Z"
 }
