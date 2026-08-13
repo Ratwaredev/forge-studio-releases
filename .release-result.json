@@ -2,8 +2,9 @@
   "version": null,
   "tag": null,
   "status": "failure",
-  "runId": "31346593729",
-  "commit": "5d3c6dc9651dfb10ee690d63dc8701c6ab5de5fc",
+  "runId": "31717530806",
+  "releaseCommit": "b2436a9bc5fae6d9343502aa11c49230ff94f105",
+  "sourceCommit": null,
   "installer": null,
   "installerBytes": 0,
   "sha256": null,
@@ -17,5 +18,5 @@
     "autoDownload": true,
     "autoInstallOnQuit": true
   },
-  "recordedAt": "2026-08-13T15:34:13.346Z"
+  "recordedAt": "2026-08-13T15:50:15.074Z"
 }
