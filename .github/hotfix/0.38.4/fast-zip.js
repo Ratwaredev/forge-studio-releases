@@ -16,6 +16,7 @@ export async function extractZip(zipPath, destination) {
       let settled = false;
       let ended = false;
       let active = 0;
+      let entryRequestPending = false;
       const finish = () => {
         if (settled || !ended || active !== 0) return;
         settled = true;
@@ -29,12 +30,14 @@ export async function extractZip(zipPath, destination) {
         reject(error);
       };
       const requestNext = () => {
-        if (settled || ended || active >= ZIP_CONCURRENCY) return;
-        try { zipFile.readEntry(); } catch (error) { fail(error); }
+        if (settled || ended || entryRequestPending || active >= ZIP_CONCURRENCY) return;
+        entryRequestPending = true;
+        try { zipFile.readEntry(); } catch (error) { entryRequestPending = false; fail(error); }
       };
       zipFile.on("error", fail);
-      zipFile.on("end", () => { ended = true; finish(); });
+      zipFile.on("end", () => { entryRequestPending = false; ended = true; finish(); });
       zipFile.on("entry", (entry) => {
+        entryRequestPending = false;
         let relative;
         let outputPath;
         try {
@@ -53,7 +56,7 @@ export async function extractZip(zipPath, destination) {
                 pipeline(stream, fs.createWriteStream(outputPath, { mode: rawMode || 0o666 })).then(resolveStream, rejectStream);
               });
             }));
-        if (active < ZIP_CONCURRENCY) requestNext();
+        requestNext();
         work.then(() => {
           active -= 1;
           if (!ended) requestNext();
