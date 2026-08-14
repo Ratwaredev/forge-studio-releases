@@ -1,0 +1,36 @@
+name: Release Forge 0.38.3 UX reliability
+
+on:
+  push:
+    branches: [hotfix-forge-0381-repack]
+    paths:
+      - '.github/workflows/release-0383-ux.yml'
+      - '.github/hotfix/0.38.3/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-0383-ux
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Prepare verified 0.38.3 payload
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/hotfix/0.38.3/prepare.ps1
+      - name: Package, install-test and publish 0.38.3
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/hotfix/0.38.3/package.ps1
