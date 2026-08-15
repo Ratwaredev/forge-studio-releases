@@ -1,13 +1,8 @@
-# Builds the latest verified Forge source snapshot prepared by Ratwaredev/forgestudio CI.
+# Builds a release only from the verified clean-source delivery prepared by Ratwaredev/forgestudio.
 name: Build and publish Forge Studio
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
-    paths:
-      - ".github/workflows/build-forge.yml"
 
 permissions:
   contents: write
@@ -19,7 +14,7 @@ concurrency:
 jobs:
   build-windows:
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Fetch verified Forge source snapshot
@@ -27,256 +22,224 @@ jobs:
         shell: pwsh
         env:
           SOURCE_URL: https://raw.githubusercontent.com/Ratwaredev/forgestudio/release-source/.forge-delivery/forge-studio-public-source.zip?token=A7LWGN45SUGF5ECCYGPOKXDKPXT23AA
-          SOURCE_SHA: 6e8453f2966658b3d3e4c371368f26b747b3e282
-          SOURCE_ZIP_SHA256: 0f82f1555e3320df6f948c550263aafe5f31e451d9b0040d4290815782d4d708
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
+          $manifestUrl = $env:SOURCE_URL.Replace('forge-studio-public-source.zip','chunks/manifest.json')
+          Invoke-WebRequest -Uri $manifestUrl -OutFile forge-source-manifest.json
+          $manifest = Get-Content forge-source-manifest.json -Raw | ConvertFrom-Json
+          if ([string]$manifest.encoding -ne 'base64') { throw 'Unexpected Forge source delivery encoding.' }
+          if ([string]$manifest.sha256 -notmatch '^[0-9a-f]{64}$') { throw 'Invalid Forge source SHA-256 manifest.' }
+          if ([string]$manifest.sourceCommit -notmatch '^[0-9a-f]{40}$') { throw 'Invalid Forge source commit manifest.' }
+
           Invoke-WebRequest -Uri $env:SOURCE_URL -OutFile forge-source.zip
           $actual = (Get-FileHash forge-source.zip -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $env:SOURCE_ZIP_SHA256) {
-            throw "Verified Forge source checksum mismatch."
-          }
+          if ($actual -ne [string]$manifest.sha256) { throw 'Verified Forge source checksum mismatch.' }
+          $bytes = (Get-Item forge-source.zip).Length
+          if ($bytes -ne [long]$manifest.bytes) { throw "Verified Forge source byte count mismatch: $bytes != $($manifest.bytes)" }
+
           New-Item -ItemType Directory -Force forge-src | Out-Null
           Expand-Archive -Path forge-source.zip -DestinationPath forge-src -Force
-          if (-not (Test-Path forge-src/package.json)) {
-            throw "Verified Forge source snapshot does not contain package.json at root."
+          foreach ($required in @('package.json','package-lock.json','forge-version.json','forge-toolchains.json','scripts/sync-build-version.mjs','scripts/prepare-godot-toolchain.mjs','scripts/verify-release-toolchain.mjs')) {
+            if (-not (Test-Path "forge-src/$required")) { throw "Verified Forge source is missing $required" }
           }
-          $sourceVersion = node -p "require('./forge-src/package.json').version"
-          if ($sourceVersion -ne '0.38.0') {
-            throw "Expected Forge 0.38.0, got $sourceVersion"
-          }
-          Write-Host "Verified Forge source loaded. Version: $sourceVersion · $env:SOURCE_SHA"
-          "version=$sourceVersion" >> $env:GITHUB_OUTPUT
-          "sha=$env:SOURCE_SHA" >> $env:GITHUB_OUTPUT
+
+          $identity = Get-Content forge-src/forge-version.json -Raw | ConvertFrom-Json
+          $package = Get-Content forge-src/package.json -Raw | ConvertFrom-Json
+          $version = [string]$identity.version
+          if ($identity.releaseReady -ne $true) { throw "Forge $version is not marked releaseReady; no public release will be created." }
+          if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Public Forge release requires final semver, got $version" }
+          if ([string]$package.version -ne $version) { throw "package.json version does not match forge-version.json ($($package.version) != $version)" }
+          if ([string]$manifest.version -ne $version) { throw "Delivery manifest version does not match source ($($manifest.version) != $version)" }
+
+          Write-Host "Verified Forge source loaded · $version · $($manifest.sourceCommit) · $actual"
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "tag=v$version" >> $env:GITHUB_OUTPUT
+          "sha=$($manifest.sourceCommit)" >> $env:GITHUB_OUTPUT
+          "source_sha256=$actual" >> $env:GITHUB_OUTPUT
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: forge-src/package-lock.json
 
+      - name: Synchronize source metadata before npm ci
+        working-directory: forge-src
+        run: node scripts/sync-build-version.mjs
+
       - name: Install dependencies
         working-directory: forge-src
         run: npm ci
 
-      - name: Validate Forge
+      - name: Validate Forge source
         working-directory: forge-src
         run: npm test
 
-      - name: Verify updater implementation
+      - name: Audit runtime dependencies
+        working-directory: forge-src
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Verify updater contract
         working-directory: forge-src
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
           $package = Get-Content package.json -Raw | ConvertFrom-Json
-          if ($package.dependencies.'electron-updater' -eq $null) {
-            throw "electron-updater dependency is missing."
-          }
+          if ($null -eq $package.dependencies.'electron-updater') { throw 'electron-updater dependency is missing.' }
           $provider = @($package.build.publish)[0]
-          if ($provider.provider -ne 'github' -or $provider.owner -ne 'Ratwaredev' -or $provider.repo -ne 'forge-studio-releases') {
-            throw "Forge publish provider does not point to Ratwaredev/forge-studio-releases."
-          }
+          if ($provider.provider -ne 'github' -or $provider.owner -ne 'Ratwaredev' -or $provider.repo -ne 'forge-studio-releases') { throw 'Wrong updater repository.' }
           $main = Get-Content desktop/main.cjs -Raw
-          foreach ($contract in @(
-            'autoUpdater.autoDownload = true',
-            'autoUpdater.autoInstallOnAppQuit = true',
-            'checkForUpdates()',
-            '4 * 60 * 60 * 1_000'
-          )) {
-            if (-not $main.Contains($contract)) {
-              throw "Missing updater contract: $contract"
-            }
+          foreach ($contract in @('autoUpdater.autoDownload = true','autoUpdater.autoInstallOnAppQuit = true','checkForUpdates()','4 * 60 * 60 * 1_000')) {
+            if (-not $main.Contains($contract)) { throw "Missing updater contract: $contract" }
+          }
+          $control = Get-Content desktop/update-bootstrap.cjs -Raw
+          foreach ($contract in @('update-policy.json','VALID_CHANNELS','allowPrerelease','minimumSupportedVersion')) {
+            if (-not $control.Contains($contract)) { throw "Missing update-control contract: $contract" }
           }
 
-      - name: Build Windows installer
+      - name: Build Windows installer from clean source
         working-directory: forge-src
         shell: pwsh
         env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run dist:win -- --publish never
 
-      - name: Validate local updater assets and checksum
+      - name: Validate local release assets
         id: release
         working-directory: forge-src
         shell: pwsh
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $version = node -p "require('./package.json').version"
-          if ($version -notmatch '^\d+\.\d+\.\d+$') {
-            throw "Invalid version: $version"
-          }
-
-          $installerName = "Forge-Studio-Setup-$version-x64.exe"
+          $ErrorActionPreference = 'Stop'
+          $installerName = "Forge-Studio-Setup-$env:VERSION-x64.exe"
           $installer = "release/$installerName"
-          $blockmap = "$installer.blockmap"
-          $latest = "release/latest.yml"
-
-          foreach ($file in @($installer, $blockmap, $latest)) {
-            if (-not (Test-Path $file)) {
-              throw "Missing release asset: $file"
-            }
+          foreach ($file in @($installer,"$installer.blockmap",'release/latest.yml')) {
+            if (-not (Test-Path $file)) { throw "Missing release asset: $file" }
           }
-
-          $installerBytes = (Get-Item $installer).Length
-          if ($installerBytes -lt 10MB) {
-            throw "Installer is unexpectedly small: $installerBytes bytes"
-          }
-
-          $latestText = Get-Content $latest -Raw
-          if ($latestText -notmatch "(?m)^version:\s*$([regex]::Escape($version))\s*$") {
-            throw "latest.yml does not contain version $version"
-          }
-          if ($latestText -notmatch [regex]::Escape($installerName)) {
-            throw "latest.yml does not reference $installerName"
-          }
-
+          $bytes = (Get-Item $installer).Length
+          if ($bytes -lt 150MB) { throw "Installer is too small to contain Forge plus verified Godot: $bytes bytes" }
+          $latest = Get-Content release/latest.yml -Raw
+          if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'latest.yml has wrong version.' }
+          if ($latest -notmatch [regex]::Escape($installerName)) { throw 'latest.yml does not reference installer.' }
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $installerName" | Set-Content -Encoding ascii release/SHA256SUMS.txt
-
-          "version=$version" >> $env:GITHUB_OUTPUT
-          "tag=v$version" >> $env:GITHUB_OUTPUT
           "installer_name=$installerName" >> $env:GITHUB_OUTPUT
-          "installer_bytes=$installerBytes" >> $env:GITHUB_OUTPUT
+          "installer_bytes=$bytes" >> $env:GITHUB_OUTPUT
           "sha256=$hash" >> $env:GITHUB_OUTPUT
 
-      - name: Publish or repair release
-        shell: pwsh
+      - name: Fresh-install smoke before publishing
         working-directory: forge-src
+        shell: pwsh
+        env:
+          VERSION: ${{ steps.source.outputs.version }}
+          INSTALLER_NAME: ${{ steps.release.outputs.installer_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $install = Join-Path $env:RUNNER_TEMP 'forge-release-smoke'
+          Remove-Item $install -Recurse -Force -ErrorAction SilentlyContinue
+          $installer = (Resolve-Path "release/$env:INSTALLER_NAME").Path
+          $proc = Start-Process -FilePath $installer -ArgumentList '/S',"/D=$install" -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "Forge installer smoke exited $($proc.ExitCode)" }
+          $app = Join-Path $install 'resources\app'
+          $installedVersion = node -p "require('$($app.Replace('\','/'))/package.json').version"
+          if ($installedVersion -ne $env:VERSION) { throw "Installed Forge version mismatch: $installedVersion" }
+          foreach ($required in @('forge-version.json','forge-toolchains.json','THIRD_PARTY_NOTICES.md','scripts\verify-release-toolchain.mjs','toolchains\godot\toolchain.json')) {
+            if (-not (Test-Path (Join-Path $app $required))) { throw "Installed Forge missing $required" }
+          }
+          Push-Location $app
+          try {
+            node scripts/verify-release-toolchain.mjs --require-runtime-smoke
+            if ($LASTEXITCODE -ne 0) { throw 'Installed bundled Godot smoke failed.' }
+          } finally { Pop-Location }
+          Write-Host "FORGE_FRESH_INSTALL_OK $installedVersion"
+
+      - name: Publish release
+        working-directory: forge-src
+        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          VERSION: ${{ steps.release.outputs.version }}
-          SOURCE_SHA: ${{ steps.source.outputs.sha }}
+          VERSION: ${{ steps.source.outputs.version }}
+          TAG: ${{ steps.source.outputs.tag }}
+          SOURCE_COMMIT: ${{ steps.source.outputs.sha }}
+          SOURCE_SHA256: ${{ steps.source.outputs.source_sha256 }}
+          INSTALLER_NAME: ${{ steps.release.outputs.installer_name }}
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
           @"
-          # Forge Studio $env:RELEASE_TAG
+          # Forge Studio $env:TAG
 
-          Stable Windows release with automatic updates.
+          Canonical Windows release built from verified clean source.
 
-          - Game, Web and Tools product surfaces
-          - Minimal project-first UI
-          - Asset Vault with LOD generation and 3D Source/LOD preview
-          - One-minute human quickstart and coding-agent onboarding
-          - Godot benchmark and deterministic validation gates
-          - Installer: Forge-Studio-Setup-$env:VERSION-x64.exe
+          - Source commit: $env:SOURCE_COMMIT
+          - Source archive SHA-256: $env:SOURCE_SHA256
+          - Bundled Godot provenance pinned in forge-toolchains.json
+          - Fresh-installed Forge and bundled Godot passed runtime smoke before publication
+          - Installer: $env:INSTALLER_NAME
           - Update metadata: latest.yml + blockmap
           - Integrity: SHA256SUMS.txt
-          - Source commit: $env:SOURCE_SHA
           "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
-
-          if (gh release view $env:RELEASE_TAG --repo "${{ github.repository }}" 2>$null) {
-            gh release upload $env:RELEASE_TAG `
-              "release/Forge-Studio-Setup-$env:VERSION-x64.exe" `
-              "release/Forge-Studio-Setup-$env:VERSION-x64.exe.blockmap" `
-              "release/latest.yml" `
-              "release/SHA256SUMS.txt" `
-              --repo "${{ github.repository }}" `
-              --clobber
+          $installer = "release/$env:INSTALLER_NAME"
+          if (gh release view $env:TAG --repo "${{ github.repository }}" 2>$null) {
+            gh release upload $env:TAG $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --clobber
+            gh release edit $env:TAG --repo "${{ github.repository }}" --title "Forge Studio $env:TAG" --notes-file release/RELEASE_NOTES.md --latest
           } else {
-            gh release create $env:RELEASE_TAG `
-              "release/Forge-Studio-Setup-$env:VERSION-x64.exe" `
-              "release/Forge-Studio-Setup-$env:VERSION-x64.exe.blockmap" `
-              "release/latest.yml" `
-              "release/SHA256SUMS.txt" `
-              --repo "${{ github.repository }}" `
-              --target main `
-              --title "Forge Studio $env:RELEASE_TAG" `
-              --notes-file release/RELEASE_NOTES.md `
-              --latest
+            gh release create $env:TAG $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --target main --title "Forge Studio $env:TAG" --notes-file release/RELEASE_NOTES.md --latest
           }
 
-      - name: Verify public installer and updater feed
+      - name: Verify public updater feed
         id: verify_public
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-          VERSION: ${{ steps.release.outputs.version }}
+          VERSION: ${{ steps.source.outputs.version }}
+          TAG: ${{ steps.source.outputs.tag }}
           INSTALLER_NAME: ${{ steps.release.outputs.installer_name }}
           EXPECTED_SHA256: ${{ steps.release.outputs.sha256 }}
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
           Remove-Item verify -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Force verify | Out-Null
-          gh release download $env:RELEASE_TAG --repo "${{ github.repository }}" --dir verify
-
-          foreach ($file in @(
-            "verify/$env:INSTALLER_NAME",
-            "verify/$env:INSTALLER_NAME.blockmap",
-            "verify/latest.yml",
-            "verify/SHA256SUMS.txt"
-          )) {
-            if (-not (Test-Path $file)) {
-              throw "Published asset missing: $file"
-            }
+          New-Item -ItemType Directory verify | Out-Null
+          gh release download $env:TAG --repo "${{ github.repository }}" --dir verify
+          foreach ($file in @("verify/$env:INSTALLER_NAME","verify/$env:INSTALLER_NAME.blockmap",'verify/latest.yml','verify/SHA256SUMS.txt')) {
+            if (-not (Test-Path $file)) { throw "Published asset missing: $file" }
           }
-
-          $installerPath = "verify/$env:INSTALLER_NAME"
-          $installerBytes = (Get-Item $installerPath).Length
-          if ($installerBytes -lt 10MB) {
-            throw "Published installer is unexpectedly small: $installerBytes bytes"
-          }
-
-          $actual = (Get-FileHash $installerPath -Algorithm SHA256).Hash.ToLowerInvariant()
-          $publishedExpected = (Get-Content verify/SHA256SUMS.txt -Raw).Trim().Split(' ')[0].ToLowerInvariant()
-          if ($actual -ne $env:EXPECTED_SHA256 -or $actual -ne $publishedExpected) {
-            throw "Checksum mismatch"
-          }
-
-          $latestText = Get-Content verify/latest.yml -Raw
-          if ($latestText -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") {
-            throw "Published latest.yml has the wrong version."
-          }
-          if ($latestText -notmatch [regex]::Escape($env:INSTALLER_NAME)) {
-            throw "Published latest.yml does not reference the installer."
-          }
-
-          "verified_bytes=$installerBytes" >> $env:GITHUB_OUTPUT
+          $actual = (Get-FileHash "verify/$env:INSTALLER_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
+          $declared = (Get-Content verify/SHA256SUMS.txt -Raw).Trim().Split(' ')[0].ToLowerInvariant()
+          if ($actual -ne $env:EXPECTED_SHA256 -or $actual -ne $declared) { throw 'Published checksum mismatch.' }
+          $latest = Get-Content verify/latest.yml -Raw
+          if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'Published latest.yml has wrong version.' }
+          if ($latest -notmatch [regex]::Escape($env:INSTALLER_NAME)) { throw 'Published latest.yml does not reference installer.' }
           "verified_sha256=$actual" >> $env:GITHUB_OUTPUT
-          "download_url=https://github.com/${{ github.repository }}/releases/download/$env:RELEASE_TAG/$env:INSTALLER_NAME" >> $env:GITHUB_OUTPUT
-          "latest_url=https://github.com/${{ github.repository }}/releases/download/$env:RELEASE_TAG/latest.yml" >> $env:GITHUB_OUTPUT
+          "verified_bytes=$((Get-Item "verify/$env:INSTALLER_NAME").Length)" >> $env:GITHUB_OUTPUT
 
       - name: Record verified release result
         if: always()
         uses: actions/github-script@v7
         env:
-          RELEASE_VERSION: ${{ steps.release.outputs.version }}
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.source.outputs.version }}
+          RELEASE_TAG: ${{ steps.source.outputs.tag }}
           SOURCE_SHA: ${{ steps.source.outputs.sha }}
           INSTALLER_NAME: ${{ steps.release.outputs.installer_name }}
           INSTALLER_BYTES: ${{ steps.verify_public.outputs.verified_bytes }}
           INSTALLER_SHA256: ${{ steps.verify_public.outputs.verified_sha256 }}
-          DOWNLOAD_URL: ${{ steps.verify_public.outputs.download_url }}
-          LATEST_URL: ${{ steps.verify_public.outputs.latest_url }}
           JOB_STATUS: ${{ job.status }}
         with:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const branch = 'release-status';
-            const path = '.release-result.json';
-
+            const filePath = '.release-result.json';
             let branchExists = true;
-            try {
-              await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` });
-            } catch (error) {
-              if (error.status !== 404) throw error;
-              branchExists = false;
-            }
-            if (!branchExists) {
-              await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: context.sha });
-            }
-
+            try { await github.rest.git.getRef({ owner, repo, ref: `heads/${branch}` }); }
+            catch (error) { if (error.status === 404) branchExists = false; else throw error; }
+            if (!branchExists) await github.rest.git.createRef({ owner, repo, ref: `refs/heads/${branch}`, sha: context.sha });
             let sha;
             try {
-              const current = await github.rest.repos.getContent({ owner, repo, path, ref: branch });
+              const current = await github.rest.repos.getContent({ owner, repo, path: filePath, ref: branch });
               if (!Array.isArray(current.data)) sha = current.data.sha;
-            } catch (error) {
-              if (error.status !== 404) throw error;
-            }
-
+            } catch (error) { if (error.status !== 404) throw error; }
             const payload = {
               version: process.env.RELEASE_VERSION || null,
               tag: process.env.RELEASE_TAG || null,
@@ -287,25 +250,10 @@ jobs:
               installer: process.env.INSTALLER_NAME || null,
               installerBytes: Number(process.env.INSTALLER_BYTES || 0),
               sha256: process.env.INSTALLER_SHA256 || null,
-              downloadUrl: process.env.DOWNLOAD_URL || null,
-              latestUrl: process.env.LATEST_URL || null,
-              updater: {
-                provider: 'github',
-                repository: `${owner}/${repo}`,
-                startupCheckSeconds: 5,
-                repeatCheckHours: 4,
-                autoDownload: true,
-                autoInstallOnQuit: true
-              },
               recordedAt: new Date().toISOString()
             };
-
             await github.rest.repos.createOrUpdateFileContents({
-              owner,
-              repo,
-              path,
-              branch,
-              sha,
+              owner, repo, path: filePath, branch, sha,
               message: `release: ${payload.status} ${payload.tag || ''}`.trim(),
               content: Buffer.from(`${JSON.stringify(payload, null, 2)}\n`).toString('base64')
             });
