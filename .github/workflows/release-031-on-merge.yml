@@ -1,31 +1,18 @@
-name: Bootstrap Forge 0.34.0 release
+name: Legacy Forge 0.34 bootstrap (disabled)
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/release-031-on-merge.yml'
+  workflow_dispatch:
 
 permissions:
-  actions: write
   contents: read
 
 jobs:
-  dispatch-controlled-release:
+  legacy-disabled:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
     steps:
-      - name: Dispatch controlled Forge 0.34.0 release
-        env:
-          GH_TOKEN: ${{ github.token }}
+      - name: Explain canonical release path
         run: |
-          set -euo pipefail
-          gh workflow run controlled-release.yml \
-            --repo "${{ github.repository }}" \
-            --ref main \
-            -f source_ref=feat/forge-034-real-workbench \
-            -f rollout_percentage=100 \
-            -f minimum_supported_version=0.31.0 \
-            -f blocked_versions= \
-            -f release_notes='Forge 0.34.0: simplified Preview/Code/Terminal workbench, Monaco editing with immutable snapshots, xterm process output, and guarded repair for legacy snapshot checksum metadata. RatLab source remains separated.'
-          echo 'Controlled Forge 0.34.0 release dispatched.'
+          echo "This Forge 0.34 bootstrap is intentionally disabled."
+          echo "It previously dispatched the legacy Ratlab-based controlled-release workflow."
+          echo "Use release-current-forge.yml or build-forge.yml for current Forge releases."
+          echo "No workflow was dispatched and no release was created."
