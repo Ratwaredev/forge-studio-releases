@@ -1,0 +1,31 @@
+name: Release Forge 0.38.6 preview and Activity hotfix
+
+on:
+  push:
+    branches: [hotfix-forge-0386-preview-activity]
+    paths:
+      - '.github/workflows/release-0386-preview-activity.yml'
+      - '.github/hotfix/0.38.6/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-0386-preview-activity
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build, install-test and publish Forge 0.38.6
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/hotfix/0.38.6/release.ps1
