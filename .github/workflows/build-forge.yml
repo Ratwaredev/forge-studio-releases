@@ -115,7 +115,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: npm run dist:win -- --publish never
 
-      - name: Validate local release assets
+      - name: Validate local release assets and seed rollout policy
         id: release
         working-directory: forge-src
         shell: pwsh
@@ -133,6 +133,25 @@ jobs:
           $latest = Get-Content release/latest.yml -Raw
           if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'latest.yml has wrong version.' }
           if ($latest -notmatch [regex]::Escape($installerName)) { throw 'latest.yml does not reference installer.' }
+          if ($latest -match '(?m)^stagingPercentage:') { throw 'Canonical initial release feed must not contain staged rollout metadata; use manage-rollout.yml after publication.' }
+
+          $policy = [ordered]@{
+            schema = 1
+            latestVersion = $env:VERSION
+            minimumSupportedVersion = $null
+            rolloutPercentage = 100
+            blockedVersions = @()
+            paused = $false
+            feed = 'github-releases'
+            repository = '${{ github.repository }}'
+            generatedAt = (Get-Date).ToUniversalTime().ToString('o')
+          }
+          $policy | ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 release/update-policy.json
+          $roundTrip = Get-Content release/update-policy.json -Raw | ConvertFrom-Json
+          if ($roundTrip.latestVersion -ne $env:VERSION -or [int]$roundTrip.rolloutPercentage -ne 100 -or $roundTrip.paused -ne $false) {
+            throw 'Initial update-policy.json failed round-trip verification.'
+          }
+
           $hash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
           "$hash  $installerName" | Set-Content -Encoding ascii release/SHA256SUMS.txt
           "installer_name=$installerName" >> $env:GITHUB_OUTPUT
@@ -187,18 +206,20 @@ jobs:
           - Bundled Godot provenance pinned in forge-toolchains.json
           - Fresh-installed Forge and bundled Godot passed runtime smoke before publication
           - Installer: $env:INSTALLER_NAME
-          - Update metadata: latest.yml + blockmap
+          - Update metadata: latest.yml + blockmap + update-policy.json
+          - Initial rollout policy: 100%, not paused, no blocked versions
           - Integrity: SHA256SUMS.txt
           "@ | Set-Content -Encoding utf8 release/RELEASE_NOTES.md
           $installer = "release/$env:INSTALLER_NAME"
+          $assets = @($installer,"$installer.blockmap",'release/latest.yml','release/SHA256SUMS.txt','release/update-policy.json')
           if (gh release view $env:TAG --repo "${{ github.repository }}" 2>$null) {
-            gh release upload $env:TAG $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --clobber
+            gh release upload $env:TAG @assets --repo "${{ github.repository }}" --clobber
             gh release edit $env:TAG --repo "${{ github.repository }}" --title "Forge Studio $env:TAG" --notes-file release/RELEASE_NOTES.md --latest
           } else {
-            gh release create $env:TAG $installer "$installer.blockmap" 'release/latest.yml' 'release/SHA256SUMS.txt' --repo "${{ github.repository }}" --target main --title "Forge Studio $env:TAG" --notes-file release/RELEASE_NOTES.md --latest
+            gh release create $env:TAG @assets --repo "${{ github.repository }}" --target main --title "Forge Studio $env:TAG" --notes-file release/RELEASE_NOTES.md --latest
           }
 
-      - name: Verify public updater feed
+      - name: Verify public updater feed and rollout policy
         id: verify_public
         shell: pwsh
         env:
@@ -212,7 +233,7 @@ jobs:
           Remove-Item verify -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory verify | Out-Null
           gh release download $env:TAG --repo "${{ github.repository }}" --dir verify
-          foreach ($file in @("verify/$env:INSTALLER_NAME","verify/$env:INSTALLER_NAME.blockmap",'verify/latest.yml','verify/SHA256SUMS.txt')) {
+          foreach ($file in @("verify/$env:INSTALLER_NAME","verify/$env:INSTALLER_NAME.blockmap",'verify/latest.yml','verify/SHA256SUMS.txt','verify/update-policy.json')) {
             if (-not (Test-Path $file)) { throw "Published asset missing: $file" }
           }
           $actual = (Get-FileHash "verify/$env:INSTALLER_NAME" -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -221,6 +242,12 @@ jobs:
           $latest = Get-Content verify/latest.yml -Raw
           if ($latest -notmatch "(?m)^version:\s*$([regex]::Escape($env:VERSION))\s*$") { throw 'Published latest.yml has wrong version.' }
           if ($latest -notmatch [regex]::Escape($env:INSTALLER_NAME)) { throw 'Published latest.yml does not reference installer.' }
+          if ($latest -match '(?m)^stagingPercentage:') { throw 'Fresh canonical feed unexpectedly contains staged rollout metadata.' }
+          $policy = Get-Content verify/update-policy.json -Raw | ConvertFrom-Json
+          if ($policy.schema -ne 1 -or $policy.latestVersion -ne $env:VERSION -or [int]$policy.rolloutPercentage -ne 100 -or $policy.paused -ne $false) {
+            throw 'Published update-policy.json is not the canonical initial 100% policy.'
+          }
+          if (@($policy.blockedVersions).Count -ne 0) { throw 'Fresh canonical release unexpectedly blocks versions.' }
           "verified_sha256=$actual" >> $env:GITHUB_OUTPUT
           "verified_bytes=$((Get-Item "verify/$env:INSTALLER_NAME").Length)" >> $env:GITHUB_OUTPUT
 
