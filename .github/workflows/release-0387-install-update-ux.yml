@@ -1,0 +1,31 @@
+name: Release Forge 0.38.7 install and update UX
+
+on:
+  push:
+    branches: [hotfix-forge-0387-install-update-ux]
+    paths:
+      - '.github/workflows/release-0387-install-update-ux.yml'
+      - '.github/hotfix/0.38.7/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: forge-0387-install-update-ux
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    timeout-minutes: 70
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+      - name: Build, install-test and publish Forge 0.38.7
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .github/hotfix/0.38.7/release.ps1
