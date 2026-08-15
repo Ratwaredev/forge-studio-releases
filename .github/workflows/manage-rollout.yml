@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: Current latest Forge release tag, for example v0.31.0
+        description: Current latest Forge release tag, for example v0.39.0
         required: true
         type: string
       rollout_percentage:
@@ -73,8 +73,12 @@ jobs:
           latest_tag="$(gh release view --repo "${{ github.repository }}" --json tagName --jq .tagName)"
           [[ "$latest_tag" == "$TAG" ]] || { echo "Only the current latest release can control the global updater feed (latest is $latest_tag)." >&2; exit 1; }
           mkdir control
-          gh release download "$TAG" --repo "${{ github.repository }}" --dir control --pattern latest.yml --pattern update-policy.json
+          gh release download "$TAG" --repo "${{ github.repository }}" --dir control --pattern latest.yml
           test -s control/latest.yml
+          gh release download "$TAG" --repo "${{ github.repository }}" --dir control --pattern update-policy.json >/dev/null 2>&1 || true
+          if [[ ! -s control/update-policy.json ]]; then
+            echo "Release has no update-policy.json yet; rollout manager will create the canonical policy asset."
+          fi
 
       - name: Update staged feed and policy
         shell: python
@@ -111,6 +115,7 @@ jobs:
               "paused": paused,
               "feed": "github-releases",
               "repository": "${{ github.repository }}",
+              "generatedAt": __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat(),
           }
           pathlib.Path("control/update-policy.json").write_text(json.dumps(policy, indent=2) + "\n", encoding="utf-8")
 
@@ -129,10 +134,13 @@ jobs:
           TAG: ${{ inputs.release_tag }}
           ROLLOUT: ${{ inputs.rollout_percentage }}
           PAUSED: ${{ inputs.paused }}
+          MINIMUM: ${{ inputs.minimum_supported_version }}
+          BLOCKED: ${{ inputs.blocked_versions }}
         run: |
           import json, os, pathlib, re, subprocess, tempfile
           paused = os.environ["PAUSED"].lower() == "true"
           expected_rollout = 0 if paused else int(os.environ["ROLLOUT"])
+          expected_blocked = [v.strip() for v in os.environ.get("BLOCKED", "").split(",") if v.strip()]
           with tempfile.TemporaryDirectory() as folder:
               subprocess.run([
                   "gh", "release", "download", os.environ["TAG"],
@@ -141,8 +149,14 @@ jobs:
               ], check=True)
               policy = json.loads(pathlib.Path(folder, "update-policy.json").read_text(encoding="utf-8-sig"))
               latest = pathlib.Path(folder, "latest.yml").read_text(encoding="utf-8-sig")
+              assert policy["schema"] == 1
+              assert policy["latestVersion"] == os.environ["TAG"].removeprefix("v")
               assert policy["rolloutPercentage"] == expected_rollout
               assert policy["paused"] is paused
+              assert policy["minimumSupportedVersion"] == (os.environ.get("MINIMUM") or None)
+              assert policy["blockedVersions"] == expected_blocked
               if expected_rollout < 100:
                   assert re.search(rf"(?m)^stagingPercentage:\s*{expected_rollout}\s*$", latest)
+              else:
+                  assert not re.search(r"(?m)^stagingPercentage:", latest)
               print(f"Rollout verified: {policy['latestVersion']} at {policy['rolloutPercentage']}%, paused={policy['paused']}")
